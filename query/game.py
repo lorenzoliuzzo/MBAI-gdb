@@ -4,8 +4,7 @@ from nba_api.live.nba.endpoints import PlayByPlay
 
 from driver import get_driver
 from router import get_season_path
-from .period import get_periods, MERGE_PERIOD_QUERY, MERGE_NEXT_PERIOD_LINK_QUERY
-from .lineup import get_lineups
+import period
 
 
 def fetch_pbp(game_id: int):
