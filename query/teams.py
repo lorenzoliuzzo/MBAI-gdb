@@ -96,7 +96,7 @@ def create_teams():
         with driver.session() as session:
             print("Writing all teams to database...")
             tx_fn = lambda tx: tx.run(MERGE_TEAMS_QUERY, teams=teams_data_list)
-            result = session.execute_write(tx_fn).single()
-            print(f"Successfully processed {result[0]} teams.")
+            result = session.execute_write(tx_fn)
+            print("Done.")
 
         driver.close()
