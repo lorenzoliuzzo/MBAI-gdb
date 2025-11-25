@@ -1,7 +1,21 @@
 import pandas as pd
 
 
-MERGE_PERIOD_QUERY = """
+def extract_periods(df):
+    periods = []
+    for n, period_df in df.groupby("period"):
+        times = pd.to_datetime(period_df["timeActual"])
+        p = {
+            "n": int(n), 
+            "start": times.iloc[0], 
+            "end": times.iloc[1]
+        }
+        periods.append(p)
+    return periods
+
+
+
+MERGE_PERIOD = """
     MATCH (g:Game {id: $game_id})
     WITH g
     UNWIND $periods AS period
@@ -28,7 +42,7 @@ MERGE_PERIOD_QUERY = """
     RETURN count(p) AS period_count
 """
 
-MERGE_NEXT_PERIOD_LINK_QUERY = """
+MERGE_NEXT_PERIOD_LINK = """
     MATCH (g:Game {id: $game_id})-[:HAS_PERIOD]->(p:Period)
     WITH g, p
     ORDER BY p.n ASC
@@ -40,15 +54,19 @@ MERGE_NEXT_PERIOD_LINK_QUERY = """
 """
 
 
-def get_periods(game_df):
-    periods = []
-    df = game_df[game_df["actionType"] == "period"]
-    for n, game_df in df.groupby("period"):
-        times = pd.to_datetime(game_df["timeActual"])
-        p = {
-            "n": n, 
-            "start": times.iloc[0], 
-            "end": times.iloc[1]
-        }
-        periods.append(p)
-    return periods
+def create_periods(session, game_id, periods_df): 
+    print(f"Creating `Period`s for `Game` {game_id}...")
+
+    periods = extract_periods(periods_df)
+    if len(periods) < 4: 
+        return 
+
+    MERGE_PERIOD_TX = lambda tx: tx.run(MERGE_PERIOD, 
+        game_id=game_id, periods=periods
+    )
+    session.execute_write(MERGE_PERIOD_TX)
+
+    MERGE_NEXT_PERIOD_LINK_TX = lambda tx: tx.run(MERGE_NEXT_PERIOD_LINK, 
+        game_id=game_id
+    )
+    session.execute_write(MERGE_NEXT_PERIOD_LINK_TX)
