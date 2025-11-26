@@ -70,15 +70,13 @@ MERGE_LINEUPS = """
     MATCH (g)-[:HAS_PERIOD]->(p:Period {n: lineup.period})
     MERGE (l:LineUp {ids: lineup.ids})
     MERGE (l)-[:PLAY_FOR]->(t)
-    MERGE (l)-[:APPEARS_IN]->(g)
-
-    MERGE (l)-[r_lp:APPEARS_IN]->(p)
+    MERGE (l)-[r:APPEARS_IN]->(p)
     SET
-        r_lp.time = CASE
+        r.time = CASE
                         WHEN lineup.time = "" THEN g.start
                         ELSE datetime(lineup.time)
                     END,
-        r_lp.clock = duration(lineup.clock)
+        r.clock = duration(lineup.clock)
 
     WITH lineup, l, g, p
     UNWIND lineup.ids AS p_id
