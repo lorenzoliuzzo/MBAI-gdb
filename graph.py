@@ -3,6 +3,7 @@ GET_TEAM_IDS = """
     RETURN ht.id, at.id
 """
 
+
 def get_teams(session, game_id): 
     result = session.execute_read(lambda tx: 
         tx.run(GET_TEAM_IDS, game_id=game_id).single()
