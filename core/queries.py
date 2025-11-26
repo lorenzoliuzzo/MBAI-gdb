@@ -13,8 +13,6 @@ MERGE_TEAMS = """
 
     MERGE (s:State {name: team.state})
     MERGE (c)-[:LOCATED_IN]->(s)
-
-    RETURN count(t)
 """
 
 
@@ -35,8 +33,6 @@ MERGE_GAME_SCHEDULE = """
     MERGE (g)-[:AT]->(a)
     MERGE (ht)-[:PLAYS_HOME]->(g)
     MERGE (at)-[:PLAYS_AWAY]->(g)
-
-    RETURN count(g)
 """
 
 
@@ -62,9 +58,6 @@ MERGE_PERIOD = """
     WHERE period.n > 4
     SET p:OverTime
     REMOVE p:RegularPeriod
-
-    WITH p
-    RETURN count(p) AS period_count
 """
 
 
@@ -104,20 +97,14 @@ MERGE_NEXT_GAME_LINK = """
     MATCH (s:Season {id: $season_id})-[:HAS_GAME]->(g:Game)<-[:PLAYS_HOME|PLAYS_AWAY]-(t:Team)
     WITH t, g ORDER BY g.date ASC     
     
-    WITH t, 
-        collect(g) AS games, 
-        size(collect(g)) AS list_size,
-        range(0, size(collect(g)) - 2) AS indexes
-    
-    UNWIND indexes AS i        
+    WITH t, collect(g) AS games, 
+    UNWIND range(0, size(games) - 2) AS i        
     WITH t, 
         games[i] AS prev_g, 
         games[i+1] AS next_g,
         duration.between(games[i].date, games[i+1].date) AS delta_t
 
     MERGE (prev_g)-[:NEXT {time_since: delta_t}]->(next_g)
-
-    RETURN count(prev_g) AS linked_games_count
 """
 
 
@@ -129,18 +116,16 @@ MERGE_NEXT_PERIOD_LINK = """
     MATCH (p_next:Period {n: p.n + 1})
     WHERE (g)-[:HAS_PERIOD]->(p_next)
     MERGE (p)-[:NEXT]->(p_next)
-    RETURN count(p) AS linked_count
 """
 
-
 MERGE_NEXT_LINEUP_LINK = """
-    MATCH (g:Game {id: $game_id})
-    MATCH (g)<-[:APPEARS_IN]-(l:LineUp)-[:PLAY_FOR]->(t:Team)
-    MATCH (l)-[r:APPEARS_IN]->(p:Period)
-    WHERE (g)-[:HAS_PERIOD]->(p)
+    MATCH (g:Game {id: $game_id})-[:HAS_PERIOD]->(p:Period)
+    MATCH (l:LineUp)-[r:APPEARS_IN]->(p)
+    MATCH (l)-[:PLAY_FOR]->(t:Team)
 
     WITH t, l, r.time AS time
     ORDER BY t.id, time ASC
+
     WITH t, collect(l) AS lineups
     UNWIND range(0, size(lineups) - 2) AS i
     WITH lineups[i] AS l_prev, lineups[i+1] AS l_next
