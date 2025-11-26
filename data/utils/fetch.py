@@ -3,9 +3,14 @@ import pandas as pd
 from typing import List
 from tqdm import tqdm
 from time import sleep
+
 from nba_api.stats.static import teams
-from nba_api.stats.endpoints import TeamDetails, CommonAllPlayers, CommonPlayerInfo
-from nba_api.stats.endpoints import ScheduleLeagueV2, BoxScoreTraditionalV2
+from nba_api.stats.endpoints import \
+    TeamDetails, \
+    CommonAllPlayers, CommonPlayerInfo, \
+    ScheduleLeagueV2, \
+    BoxScoreTraditionalV2
+
 from nba_api.live.nba.endpoints import PlayByPlay
 
 

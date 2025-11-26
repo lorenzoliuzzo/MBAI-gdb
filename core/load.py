@@ -1,15 +1,17 @@
 from data.utils.fetch import *
 from data.utils.extract import * 
+
 from core.queries import * 
-from core.router import get_season_path
 from core.driver import get_driver
+
 from graph import get_teams
 
+# from core.router import get_season_path
 
-def load_periods(session, game_id, periods_df): 
+
+def load_periods(session, game_id, periods): 
     print(f"Creating `Period`s for `Game` {game_id}...")
 
-    periods = extract_periods(periods_df)
     if len(periods) < 4: 
         return 
 
@@ -52,10 +54,10 @@ def load_game(season_id, game_id):
     print(f"Creating a new game: {game_id}")
 
     # filename = get_season_path(season_id) / "games" / f"g{game_id}.csv"
-    game_df = None
+    pbp_df = None
     try: 
-        # game_df = pd.read_csv(filename)
-        game_df = fetch_pbp(game_id)
+        # pbp_df = pd.read_csv(filename)
+        pbp_df = fetch_pbp(game_id)
     except Exception as e: 
         print(f"Some error occured while reading the game actions from {filename}: {e}")
     
@@ -65,26 +67,20 @@ def load_game(season_id, game_id):
     except Exception as e: 
         print(f"Some error occured while fetching the game boxscore: {e}")
 
-    # if not game_df or not boxscore_df: 
+    # if not pbp_df or not boxscore_df: 
     #     return
-
-    periods_mask = (game_df["actionType"] == "period")
-    periods_cols = ["timeActual", "period"]
-    periods_df = game_df.loc[periods_mask, periods_cols]
-
-    subs_mask = (game_df["actionType"] == "substitution")
-    subs_cols = ["timeActual", "period", "clock", "subType", "personId", "teamId"]
-    subs_df = game_df.loc[subs_mask, subs_cols]
-
-    starters_df = extract_starters(boxscore_df)
     
     with driver.session() as session:
-        load_periods(session, game_id, periods_df)
+        periods = extract_periods(pbp_df)
+        starters = extract_starters(boxscore_df)
+        subs = extract_subs(pbp_df)
+
+        load_periods(session, game_id, periods)
 
         SET_GAME_DURATION_TX = lambda tx: tx.run(SET_GAME_DURATION, game_id=game_id)
         session.execute_write(SET_GAME_DURATION_TX)
 
-        load_lineups(session, game_id, starters_df, subs_df)
+        load_lineups(session, game_id, starters, subs)
 
     driver.close()
 
