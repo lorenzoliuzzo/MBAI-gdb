@@ -295,6 +295,38 @@ MERGE_LINEUPS = """
     }
 
 
+
+    // ==========================================
+    // PHASE 5: LINK PLAYER STINTS (:NEXT)
+    // ==========================================
+
+    CALL (g) {
+        MATCH (player:Player)-[:HAD_STINT]->(ps:PlayerStint)
+        WHERE (ps)-[:IN]->(:Period)-[:IN]->(g)
+        
+        WITH player, ps
+        ORDER BY ps.global_clock ASC
+        
+        WITH player, collect(ps) AS stints
+        WHERE size(stints) > 1
+        
+        UNWIND range(0, size(stints)-2) AS i
+        WITH stints[i] AS current, stints[i+1] AS next
+        
+        WITH current, next, 
+            (next.global_clock - (current.global_clock + current.clock_duration.seconds)) AS clock_seconds_gap
+
+        WITH current, next, clock_seconds_gap,
+            duration.between((current.time + current.time_duration), next.time) AS time_duration_gap
+                          
+        MERGE (current)-[r:NEXT]->(next)
+        SET 
+            r.clock_since = duration({seconds: clock_seconds_gap}),
+            r.time_since = time_duration_gap
+    }
+
+
+
     // ==========================================
     // PHASE 5: LINK PLAYER STINTS (:NEXT)
     // ==========================================
