@@ -2,7 +2,6 @@
 **MBAI-gdb** is the graph database backend for the [Money Ball AI project](https://github.com/lorenzoliuzzo/MBAI). 
 
 The goal is to transforms raw NBA play-by-play data into a high-fidelity [Neo4j](https://github.com/neo4j/neo4j) graph, enabling advanced analytics.
-Unlike standard SQL approaches, this project models a game as a series of connected events and states.
 
 ## Core Entities
 - `Team`: static entity representing a team.
