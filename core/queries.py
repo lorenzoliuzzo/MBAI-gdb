@@ -148,9 +148,8 @@ MERGE_LINEUPS = """
 
 
     // ==========================================
-    // PHASE 2: CHRONOLOGICAL LINKING (:NEXT)
+    // PHASE 2: CHRONOLOGICAL LINKING & DURATION
     // ==========================================
-
     CALL (g) {
         MATCH (p:Period)-[:IN]->(g)
         MATCH (t:Team)-[:PLAYED_HOME|PLAYED_AWAY]->(g)
@@ -159,11 +158,23 @@ MERGE_LINEUPS = """
         WITH t, p, ls ORDER BY ls.global_clock ASC
         WITH t, p, collect(ls) AS stints
         
-        UNWIND range(0, size(stints)-2) AS j
-        WITH stints[j] AS prev, stints[j+1] AS next
+        UNWIND range(0, size(stints)-1) AS i
+        WITH stints, i, stints[i] AS current
         
-        MERGE (prev)-[:NEXT]->(next)
-        SET prev.duration = prev.clock - next.clock
+        WITH i, current, stints,
+            CASE 
+                WHEN i < size(stints)-1 THEN stints[i+1] 
+                ELSE NULL 
+            END AS next,
+            CASE 
+                WHEN i < size(stints)-1 THEN stints[i+1].clock 
+                ELSE duration("PT0S") 
+            END AS end_clock
+
+        FOREACH (_ IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (current)-[:NEXT]->(next)
+        )
+        SET current.duration = current.clock - end_clock
     }
 
 
