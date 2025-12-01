@@ -1,6 +1,6 @@
 import json 
 import pandas as pd
-from typing import List
+from typing import List, Dict
 from tqdm import tqdm
 from time import sleep
 
@@ -74,7 +74,8 @@ def fetch_player_info(player_id):
 
 
 
-def fetch_schedule(season_id):
+def fetch_schedule(season_id) -> List[Dict]:
+    print(f"Fetching games schedule for season {season_id} from NBA_API...")
     schedule = ScheduleLeagueV2(season=season_id)
     schedule_df = schedule.get_data_frames()[0]
     df = pd.DataFrame()
@@ -82,7 +83,7 @@ def fetch_schedule(season_id):
     df["game_id"] = pd.to_numeric(schedule_df["gameId"], downcast="unsigned")
     df["home_team_id"] = pd.to_numeric(schedule_df["homeTeam_teamId"], downcast="unsigned")
     df["away_team_id"] = pd.to_numeric(schedule_df["awayTeam_teamId"], downcast="unsigned")
-    return df
+    return df.to_dict("records")
 
 
 

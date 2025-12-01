@@ -1,6 +1,9 @@
 GET_TEAM_IDS = """
-    MATCH (ht:Team)-[:PLAYS_HOME]->(g:Game {id: $game_id})<-[:PLAYS_AWAY]-(at:Team)
-    RETURN ht.id, at.id
+    MATCH (g:Game {id: $game_id})-[:AT]->(a:Arena)
+    MATCH (ht:Team)-[:HOME_ARENA]->(a)
+    MATCH (ht)-[:PLAYED_HOME]->(g)
+    MATCH (at:Team)-[:PLAYED_AWAY]->(g)
+    RETURN ht.id, at.id LIMIT 1 
 """
 
 

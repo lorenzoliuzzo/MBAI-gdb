@@ -1,44 +1,48 @@
 from data.utils.fetch import *
 from data.utils.extract import * 
 
-from core.queries import * 
 from core.driver import get_driver
+from core.queries import * 
 
 from graph import get_teams
 
 
-def load_periods(session, game_id, periods): 
-    print(f"Creating `Period`s for `Game` {game_id}...")
-
-    if len(periods) < 4: 
+def load_teams():
+    driver = get_driver()
+    if not driver:
         return 
 
-    MERGE_PERIOD_TX = lambda tx: tx.run(MERGE_PERIOD, game_id=game_id, periods=periods)
-    session.execute_write(MERGE_PERIOD_TX)
+    try: 
+        teams = fetch_teams()
+    except Exception as e:
+        print(f" : {e}")
+        return
 
-    MERGE_NEXT_PERIOD_LINK_TX = lambda tx: tx.run(MERGE_NEXT_PERIOD_LINK, game_id=game_id)
-    session.execute_write(MERGE_NEXT_PERIOD_LINK_TX)
+    with driver.session() as session:
+        MERGE_TEAMS_TX = lambda tx: tx.run(MERGE_TEAMS, teams=teams)
+        session.execute_write(MERGE_TEAMS_TX)
 
-    SET_GAME_DURATION_TX = lambda tx: tx.run(SET_GAME_DURATION, game_id=game_id)
-    session.execute_write(SET_GAME_DURATION_TX)
+    driver.close()
 
 
-def load_lineups(session, game_id: int, subs: pd.DataFrame, starters: pd.DataFrame): 
-    print(f"Creating `LineUp`'s for `Game` {game_id}...")
-    
-    ht_id, at_id = get_teams(session, game_id)
-    for team_id in [ht_id, at_id]:
-        starter_ids = starters.loc[starters['TEAM_ID'] == team_id, 'PLAYER_ID'].to_list()
-        team_subs = subs[subs['teamId'] == team_id]
-        
-        lineups = extract_lineups(starter_ids, team_subs)
-        MERGE_LINEUPS_TX = lambda tx:tx.run(MERGE_LINEUPS, game_id=game_id, 
-            team_id=team_id, lineups=lineups
-        )
-        session.execute_write(MERGE_LINEUPS_TX)
 
-    MERGE_NEXT_LINEUP_LINK_TX = lambda tx: tx.run(MERGE_NEXT_LINEUP_LINK, game_id=game_id)
-    session.execute_write(MERGE_NEXT_LINEUP_LINK_TX)
+def load_season(season_id):
+    driver = get_driver()
+    if not driver:
+        return 
+
+    try: 
+        schedule = fetch_schedule(season_id)
+    except Exception as e:
+        print(f" : {e}")
+        return
+
+    with driver.session() as session:
+        MERGE_SEASON_TX = lambda tx: tx.run(MERGE_SEASON, season_id=season_id, schedule=schedule)
+        session.execute_write(MERGE_SEASON_TX)
+
+    driver.close()
+
 
 
 def load_game(season_id, game_id):
@@ -47,27 +51,53 @@ def load_game(season_id, game_id):
         return 
 
     print(f"Creating a new game: {game_id}")
+    try: 
+        boxscore_df = fetch_boxscore(game_id)
+    except Exception as e: 
+        print(f"Some error occured while fetching the game boxscore: {e}")
+        return
 
-    pbp_df = None
+    starters = extract_starters(boxscore_df)
+
     try: 
         pbp_df = fetch_pbp(game_id)
     except Exception as e: 
         print(f"Some error occured while reading the game actions from {filename}: {e}")
         return 
 
-    boxscore_df = None
-    try: 
-        boxscore_df = fetch_boxscore(game_id)
-    except Exception as e: 
-        print(f"Some error occured while fetching the game boxscore: {e}")
-        return
-    
+    pbp_df.sort_values(by="timeActual", ascending=True, inplace=True)
+
     periods = extract_periods(pbp_df)
+    if len(periods) < 4: 
+        return 
+
     subs = extract_subs(pbp_df)
-    starters = extract_starters(boxscore_df)
 
     with driver.session() as session:
-        load_periods(session, game_id, periods)
+        print("Creating `Period` nodes...")
+        MERGE_PERIODS_TX = lambda tx: tx.run(MERGE_PERIODS, game_id=game_id, periods=periods)
+        session.execute_write(MERGE_PERIODS_TX)
+
         load_lineups(session, game_id, subs, starters)
 
     driver.close()
+
+
+
+def load_lineups(session, game_id: int, subs: pd.DataFrame, starters: pd.DataFrame): 
+    print(f"Creating `LineUp`'s for `Game` {game_id}...")
+    
+    ht_id, at_id = get_teams(session, game_id)
+    ht_subs = subs[subs['teamId'] == ht_id]
+    at_subs = subs[subs['teamId'] == at_id]
+
+    ht_starter_ids = starters.loc[starters['TEAM_ID'] == ht_id, 'PLAYER_ID'].to_list()
+    at_starter_ids = starters.loc[starters['TEAM_ID'] == at_id, 'PLAYER_ID'].to_list()
+
+    ht_lineups = extract_lineups(ht_subs, ht_starter_ids)
+    at_lineups = extract_lineups(at_subs, at_starter_ids)
+
+    MERGE_LINEUPS_TX = lambda tx:tx.run(MERGE_LINEUPS, game_id=game_id, 
+        home_lineups=ht_lineups, away_lineups=at_lineups
+    )
+    session.execute_write(MERGE_LINEUPS_TX)

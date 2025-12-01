@@ -1,3 +1,21 @@
+SETUP = """
+    CREATE CONSTRAINT team_id IF NOT EXISTS FOR (t:Team) REQUIRE t.id IS UNIQUE
+    CREATE CONSTRAINT player_id IF NOT EXISTS FOR (p:Player) REQUIRE p.id IS UNIQUE
+    CREATE CONSTRAINT arena_name IF NOT EXISTS FOR (a:Arena) REQUIRE a.name IS UNIQUE
+    CREATE CONSTRAINT city_name IF NOT EXISTS FOR (c:City) REQUIRE c.name IS UNIQUE
+    CREATE CONSTRAINT state_name IF NOT EXISTS FOR (s:State) REQUIRE s.name IS UNIQUE
+    CREATE CONSTRAINT season_id IF NOT EXISTS FOR (s:Season) REQUIRE s.id IS UNIQUE
+    CREATE CONSTRAINT game_id IF NOT EXISTS FOR (g:Game) REQUIRE g.id IS UNIQUE
+    CREATE INDEX IF NOT EXISTS FOR (g:Game) ON (g.date)
+    CREATE CONSTRAINT lineup_id IF NOT EXISTS FOR (l:LineUp) REQUIRE l.id IS UNIQUE
+"""
+# CREATE INDEX IF NOT EXISTS FOR (ls:LineUpStint) ON (ls.global_seconds)
+
+
+###############
+# MERGE NODES #
+###############
+
 MERGE_TEAMS = """
     UNWIND $teams AS team 
     MERGE (t:Team {id: team.id})
@@ -6,137 +24,182 @@ MERGE_TEAMS = """
         t.abbreviation = team.abbreviation
 
     MERGE (a:Arena {name: team.arena})
-    MERGE (t)-[:PLAYS_IN]->(a)
-
     MERGE (c:City {name: team.city})
-    MERGE (a)-[:LOCATED_IN]->(c)
-
     MERGE (s:State {name: team.state})
-    MERGE (c)-[:LOCATED_IN]->(s)
+    MERGE (t)-[:HOME_ARENA]->(a)-[:IN]->(c)-[:IN]->(s)
 """
 
 
-MERGE_GAME_SCHEDULE = """
+MERGE_SEASON = """
     MERGE (s:Season {id: $season_id})  
     WITH s
     UNWIND $schedule AS game
 
-    MATCH (ht:Team {id: game.home_team_id})
+    MERGE (g:Game {id: game.game_id})-[r:IN]->(s)
+    SET g.date = datetime(game.datetime)
+
+    WITH s, g, game
+    MATCH (ht:Team {id: game.home_team_id})-[:HOME_ARENA]->(a:Arena)
     MATCH (at:Team {id: game.away_team_id})
-    MATCH (a:Arena)<-[:PLAYS_IN]-(ht)
-
-    MERGE (g:Game {id: game.game_id})
-    ON CREATE SET
-        g.date = datetime(game.datetime)
-
-    MERGE (s)-[:HAS_GAME]-(g)
     MERGE (g)-[:AT]->(a)
-    MERGE (ht)-[:PLAYS_HOME]->(g)
-    MERGE (at)-[:PLAYS_AWAY]->(g)
+    MERGE (ht)-[:PLAYED_HOME]->(g)
+    MERGE (at)-[:PLAYED_AWAY]->(g)
+
+    WITH distinct s
+    MATCH (t:Team)-[:PLAYED_HOME|PLAYED_AWAY]->(g:Game)-[r:IN]->(s)
+    WITH t, g ORDER BY g.date ASC
+
+    WITH t, collect(g) AS games
+    UNWIND range(0, size(games) - 2) AS i
+    WITH t, games[i] AS prev, games[i+1] AS next
+
+    MERGE (prev)-[r:NEXT {team_id: t.id}]->(next)
+    SET r.since = duration.between(prev.date, next.date)
 """
 
 
-MERGE_PERIOD = """
+MERGE_PERIODS = """
     MATCH (g:Game {id: $game_id})
     WITH g
     UNWIND $periods AS period
 
-    MERGE (p:Period {n: period.n})
+    MERGE (p:Period {id: $game_id + "_" + toString(period.n)})
     ON CREATE SET
+        p.n = period.n,
         p.start = datetime(period.start),
-        p.end = datetime(period.end),
-        p.duration = duration.between(period.start, period.end)
+        p.duration = duration.between(datetime(period.start), datetime(period.end))
 
-    MERGE (g)-[:HAS_PERIOD]->(p)
+    FOREACH (_ IN CASE WHEN p.n = 1 THEN [1] ELSE [] END | SET p:RegularTime:Q1)
+    FOREACH (_ IN CASE WHEN p.n = 2 THEN [1] ELSE [] END | SET p:RegularTime:Q2)
+    FOREACH (_ IN CASE WHEN p.n = 3 THEN [1] ELSE [] END | SET p:RegularTime:Q3)
+    FOREACH (_ IN CASE WHEN p.n = 4 THEN [1] ELSE [] END | SET p:RegularTime:Q4)
+    FOREACH (_ IN CASE WHEN p.n > 4 THEN [1] ELSE [] END | SET p:OverTime)
 
-    WITH g, p, period
-    WHERE period.n <= 4
-    SET p:RegularPeriod
-    REMOVE p:OverTime
+    MERGE (p)-[:IN]->(g)
+    WITH g, min(datetime(period.start)) AS first_start, max(datetime(period.end)) AS last_end
+    SET 
+        g.start = first_start,
+        g.duration = duration.between(first_start, last_end)
 
-    WITH g, p, period
-    WHERE period.n > 4
-    SET p:OverTime
-    REMOVE p:RegularPeriod
+    WITH distinct g
+    MATCH (p:Period)-[:IN]->(g)
+    WITH p ORDER BY p.n ASC
+
+    WITH collect(p) AS periods
+    UNWIND range(0, size(periods) - 2) AS i
+    WITH periods[i] AS prev, periods[i+1] AS next
+
+    MERGE (prev)-[r:NEXT]->(next)
+    ON CREATE SET 
+        r.since = duration.between((prev.start + prev.duration), next.start)
 """
+
 
 
 MERGE_LINEUPS = """
     MATCH (g:Game {id: $game_id})
-    MATCH (t:Team {id: $team_id})
-    WITH g, t
-    
-    UNWIND $lineups AS lineup
-    MATCH (g)-[:HAS_PERIOD]->(p:Period {n: lineup.period})
-    MERGE (l:LineUp {ids: lineup.ids})
-    MERGE (l)-[:PLAY_FOR]->(t)
-    MERGE (l)-[r:APPEARS_IN]->(p)
-    SET
-        r.time = CASE
-                        WHEN lineup.time = "" THEN g.start
-                        ELSE datetime(lineup.time)
-                    END,
-        r.clock = duration(lineup.clock)
+    MATCH (ht:Team)-[:PLAYED_HOME]->(g)
+    MATCH (at:Team)-[:PLAYED_AWAY]->(g)
 
-    WITH lineup, l, g, p
-    UNWIND lineup.ids AS p_id
-    MERGE (pl:Player {id: p_id}) 
-    MERGE (pl)-[r_pl:APPEARS_IN]->(l)
-    SET
-        r_pl.time = CASE
-                        WHEN lineup.time = "" THEN g.start
-                        ELSE datetime(lineup.time)
-                    END,
-        r_pl.clock = duration(lineup.clock)
+
+    // ==========================================
+    // PHASE 1: CREATE NODES (Sides Unwind)
+    // ==========================================
+
+    WITH g, [{team: ht, data: $home_lineups}, {team: at, data: $away_lineups}] AS sides
+    UNWIND sides AS side
+    WITH g, side.team AS t, side.data AS lineups
+    CALL (g, t, lineups) {
+        UNWIND range(0, size(lineups)-1) AS i
+        WITH g, t, lineups, i, lineups[i] AS lineup
+
+        WITH g, t, lineups, i, lineup,
+            reduce(s = "", x IN lineup.ids | s + (CASE WHEN s="" THEN "" ELSE "_" END) + toString(x)) AS lineup_id
+        
+        MERGE (l:LineUp {id: lineup_id})
+        MERGE (t)-[:TEAM_LINEUP]->(l)
+        
+        FOREACH (p_id IN lineup.ids |
+            MERGE (pl:Player {id: p_id})
+            MERGE (pl)-[:IN]->(l)
+        )
+
+        WITH g, t, lineups, i, lineup, l
+        MATCH (p:Period {n: lineup.period})-[:IN]->(g)
+        
+        WITH g, t, lineups, i, lineup, l, p,
+            l.id + "_" + toString(lineup.period) + "_" + toString(i) AS stint_id,
+            CASE WHEN lineup.period <= 4 THEN (lineup.period - 1) * 720 ELSE 2880 + ((lineup.period - 5) * 300) END AS p_offset,
+            CASE WHEN lineup.period <= 4 THEN 720 ELSE 300 END AS p_len
+
+        MERGE (l)-[:HAD_STINT]->(ls:LineUpStint {id: stint_id})
+        MERGE (ls)-[:IN]->(p)
+        ON CREATE SET
+            ls.time = CASE WHEN lineup.time = "" THEN p.start ELSE datetime(lineup.time) END,
+            ls.clock = duration(lineup.clock),
+            ls.global_clock = p_offset + (p_len - duration(lineup.clock).seconds)
+
+        FOREACH (_ IN CASE 
+            WHEN i = 0 THEN [1] 
+            WHEN lineups[i].period <> lineups[i-1].period THEN [1] 
+            ELSE [] 
+        END | SET ls:Starter)
+    }
+
+
+    // ==========================================
+    // PHASE 2: CHRONOLOGICAL LINKING (:NEXT)
+    // ==========================================
+
+    CALL (g) {
+        MATCH (p:Period)-[:IN]->(g)
+        MATCH (t:Team)-[:PLAYED_HOME|PLAYED_AWAY]->(g)
+        MATCH (t)-[:TEAM_LINEUP]->(:LineUp)-[:HAD_STINT]->(ls:LineUpStint)-[:IN]->(p)
+        
+        WITH t, p, ls ORDER BY ls.global_clock ASC
+        WITH t, p, collect(ls) AS stints
+        
+        UNWIND range(0, size(stints)-2) AS j
+        WITH stints[j] AS prev, stints[j+1] AS next
+        
+        MERGE (prev)-[:NEXT]->(next)
+        SET prev.duration = prev.clock - next.clock
+    }
+
+
+    // ==========================================
+    // PHASE 3: OPPONENT LINKING (:VS)
+    // ==========================================
+    CALL (g) {
+        MATCH (p:Period)-[:IN]->(g)
+        WITH g, p, 
+            CASE 
+                WHEN p.n <= 4 THEN p.n * 720 
+                ELSE 2880 + ((p.n - 4) * 300) 
+            END AS p_end_global
+
+        MATCH (ht:Team)-[:PLAYED_HOME]->(g)
+        MATCH (ht)-[:TEAM_LINEUP]->(:LineUp)-[:HAD_STINT]->(hs:LineUpStint)-[:IN]->(p)
+        OPTIONAL MATCH (hs)-[:NEXT]->(hs_next)
+        
+        MATCH (at:Team)-[:PLAYED_AWAY]->(g)
+        MATCH (at)-[:TEAM_LINEUP]->(:LineUp)-[:HAD_STINT]->(as:LineUpStint)-[:IN]->(p)
+        OPTIONAL MATCH (as)-[:NEXT]->(as_next)
+
+        WITH hs, as, p_end_global,
+            hs.global_clock AS h_start, COALESCE(hs_next.global_clock, p_end_global) AS h_end,
+            as.global_clock AS a_start, COALESCE(as_next.global_clock, p_end_global) AS a_end
+
+        WHERE h_start < a_end AND a_start < h_end
+        
+        WITH hs, as, 
+            CASE WHEN h_start > a_start THEN h_start ELSE a_start END AS overlap_start,
+            CASE WHEN h_end < a_end THEN h_end ELSE a_end END AS overlap_end
+
+        WITH hs, as, (overlap_end - overlap_start) AS seconds
+        WHERE seconds > 0
+
+        MERGE (hs)-[r:VS]-(as)
+        SET r.duration = duration({seconds: seconds})
+    }
 """
-
-
-MERGE_NEXT_GAME_LINK = """   
-    MATCH (s:Season {id: $season_id})-[:HAS_GAME]->(g:Game)<-[:PLAYS_HOME|PLAYS_AWAY]-(t:Team)
-    WITH t, g ORDER BY g.date ASC     
-    
-    WITH t, collect(g) AS games, 
-    UNWIND range(0, size(games) - 2) AS i        
-    WITH t, 
-        games[i] AS prev_g, 
-        games[i+1] AS next_g,
-        duration.between(games[i].date, games[i+1].date) AS delta_t
-
-    MERGE (prev_g)-[:NEXT {time_since: delta_t}]->(next_g)
-"""
-
-
-MERGE_NEXT_PERIOD_LINK = """
-    MATCH (g:Game {id: $game_id})-[:HAS_PERIOD]->(p:Period)
-    WITH g, p
-    ORDER BY p.n ASC
-    
-    MATCH (p_next:Period {n: p.n + 1})
-    WHERE (g)-[:HAS_PERIOD]->(p_next)
-    MERGE (p)-[:NEXT]->(p_next)
-"""
-
-MERGE_NEXT_LINEUP_LINK = """
-    MATCH (g:Game {id: $game_id})-[:HAS_PERIOD]->(p:Period)
-    MATCH (l:LineUp)-[r:APPEARS_IN]->(p)
-    MATCH (l)-[:PLAY_FOR]->(t:Team)
-
-    WITH t, l, r.time AS time
-    ORDER BY t.id, time ASC
-
-    WITH t, collect(l) AS lineups
-    UNWIND range(0, size(lineups) - 2) AS i
-    WITH lineups[i] AS l_prev, lineups[i+1] AS l_next
-    MERGE (l_prev)-[:NEXT]->(l_next)
-"""
-
-
-SET_GAME_DURATION = """
-    MATCH (g:Game {id: $game_id})-[:HAS_PERIOD]->(p:Period)
-    WITH g, min(p.start) AS first_start, max(p.end) AS last_end
-    SET 
-        g.start = first_start,
-        g.end = last_end,
-        g.duration = duration.between(first_start, last_end)
-"""
-

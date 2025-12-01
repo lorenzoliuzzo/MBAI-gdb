@@ -7,7 +7,7 @@ def extract_periods(pbp: pd.DataFrame) -> List[Dict]:
     periods_df = pbp.loc[periods_mask, ["timeActual", "period"]]
 
     periods = []
-    for period, group in periods_df.groupby("period"):
+    for period, group in periods_df.groupby("period", sort=False):
         times = pd.to_datetime(group["timeActual"])
         p = {
             "n": int(period), 
@@ -28,34 +28,47 @@ def extract_starters(boxscore: pd.DataFrame) -> pd.DataFrame:
     return boxscore.loc[mask, ["PLAYER_ID", "TEAM_ID"]]
 
 
-def extract_lineups(starters: List[int], subs: pd.DataFrame) -> List[Dict]:
+def extract_lineups(subs: pd.DataFrame, starters: List[int]) -> List[Dict]:
     assert len(starters) == 5, f"Starters list must contain 5 players, but got {len(starters)}"
-    
-    lineup_history = [
-        {
-            "period": 1,
-            "time": "",
-            "clock": "PT12M00S",
-            "ids": sorted(starters)
-        }
-    ]
 
+    history = []
     current_lineup = set(starters)
-    for time, group in subs.groupby("timeActual"):
-        for _, row in group.iterrows():
-            player = row["personId"]
+    max_period = max(subs['period'].max(), 4) if not subs.empty else 4    
+    for period in range(1, int(max_period) + 1):       
+        start_clock = "PT05M00.00S" if period > 4 else "PT12M00.00S"
+        period_subs = subs[subs['period'] == period]
+        
+        start_subs = period_subs[period_subs['clock'] == start_clock]
+        for _, row in start_subs.iterrows():
             if row["subType"] == "in":
-                current_lineup.add(player)
-            else:
-                current_lineup.discard(player)
-       
-        if len(current_lineup) == 5:            
-            new_lineup_entry = {
-                "period": int(group["period"].iloc[0]), 
-                "time": time,
-                "clock": group["clock"].iloc[0],
-                "ids": sorted(list(current_lineup))
-            }
-            lineup_history.append(new_lineup_entry)
+                current_lineup.add(row["personId"])
+            elif row["subType"] == "out":
+                current_lineup.discard(row["personId"])
+                
+        starters_entry = {
+            "period": period,
+            "time": "",
+            "clock": start_clock,
+            "ids": sorted(list(current_lineup))
+        }
+        history.append(starters_entry)
 
-    return lineup_history
+        regular_subs = period_subs[period_subs['clock'] != start_clock]
+        for clock, group in regular_subs.groupby("clock", sort=False):
+            for _, row in group.iterrows():
+                if row["subType"] == "in":
+                    current_lineup.add(row["personId"])
+                elif row["subType"] == "out":
+                    current_lineup.discard(row["personId"])
+            
+            if len(current_lineup) == 5:
+                if current_lineup != set(history[-1]["ids"]):
+                    history.append({
+                        "period": period, 
+                        "time": group['timeActual'].iloc[0],
+                        "clock": clock,
+                        "ids": sorted(list(current_lineup))
+                    })
+        
+
+    return history
