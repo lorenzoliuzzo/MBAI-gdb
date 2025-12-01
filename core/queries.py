@@ -57,7 +57,7 @@ MERGE_SEASON = """
     WITH t, games[i] AS prev, games[i+1] AS next
 
     MERGE (prev)-[r:NEXT {team_id: t.id}]->(next)
-    SET r.since = duration.between(prev.date, next.date)
+    SET r.time_since = duration.between(prev.date, next.date)
 """
 
 
@@ -94,7 +94,7 @@ MERGE_PERIODS = """
 
     MERGE (prev)-[r:NEXT]->(next)
     ON CREATE SET 
-        r.since = duration.between((prev.start + prev.duration), next.start)
+        r.time_since = duration.between((prev.start + prev.duration), next.start)
 """
 
 
@@ -206,30 +206,37 @@ MERGE_LINEUPS = """
         MATCH (at)-[:TEAM_LINEUP]->(:LineUp)-[:HAD_STINT]->(as:LineUpStint)-[:IN]->(p)
         OPTIONAL MATCH (as)-[:NEXT]->(as_next)
 
-        WITH hs, hs_next, as, as_next, p_end_global,
+        WITH hs, hs_next, as, as_next, p, p_end_global,
             hs.global_clock AS h_start, COALESCE(hs_next.global_clock, p_end_global) AS h_end,
             as.global_clock AS a_start, COALESCE(as_next.global_clock, p_end_global) AS a_end
 
         WHERE h_start < a_end AND a_start < h_end
         
-        WITH hs, hs_next, as, as_next,
+        WITH hs, hs_next, as, as_next, p,
             CASE WHEN h_start > a_start THEN h_start ELSE a_start END AS overlap_start,
             CASE WHEN h_end < a_end THEN h_end ELSE a_end END AS overlap_end
         
-        WITH hs, hs_next, as, as_next, (overlap_end - overlap_start) AS seconds
+        WITH hs, hs_next, as, as_next, p, (overlap_end - overlap_start) AS seconds
         WHERE seconds > 0
+
+        WITH hs, hs_next, as, as_next, p, seconds,
+            CASE 
+                WHEN hs_next IS NOT NULL THEN hs_next.time 
+                ELSE (p.start + p.duration) 
+            END AS hs_time_end,
+            CASE 
+                WHEN as_next IS NOT NULL THEN as_next.time 
+                ELSE (p.start + p.duration) 
+            END AS as_time_end
+
+        WITH hs, as, seconds, hs_time_end, as_time_end,
+            CASE WHEN hs.time > as.time THEN hs.time ELSE as.time END AS time_overlap_start,
+            CASE WHEN hs_time_end < as_time_end THEN hs_time_end ELSE as_time_end END AS time_overlap_end
 
         MERGE (hs)-[r:VS]-(as)
         SET 
             r.clock_duration = duration({seconds: seconds}),
-            r.time_duration = CASE 
-                WHEN hs_next IS NOT NULL AND as_next IS NOT NULL THEN 
-                    duration.between(
-                        CASE WHEN hs.time > as.time THEN hs.time ELSE as.time END,
-                        CASE WHEN hs_next.time < as_next.time THEN hs_next.time ELSE as_next.time END
-                    )
-                ELSE NULL
-            END
+            r.time_duration = duration.between(time_overlap_start, time_overlap_end)
     }
 
 
@@ -280,7 +287,7 @@ MERGE_LINEUPS = """
         
         MERGE (player)-[:HAD_STINT]->(ps)
         MERGE (ps)-[:IN]->(p)
-        MERGE (ps)-[:FOR_TEAM]->(t)
+        // MERGE (ps)-[:FOR_TEAM]->(t)
 
         FOREACH (sub_stint IN sub_stints |
             MERGE (ps)-[:IN]->(sub_stint)
@@ -318,5 +325,27 @@ MERGE_LINEUPS = """
         SET 
             r.clock_since = duration({seconds: clock_seconds_gap}),
             r.time_since = time_duration_gap
+    }
+
+
+    // ==========================================
+    // PHASE 6: PLAYER STINT VS OPPONENT LINEUP
+    // ==========================================
+    CALL (g) {
+        MATCH (p:Period)-[:IN]->(g)
+        MATCH (ps:PlayerStint)-[:IN]->(p)
+        
+        MATCH (ps)-[:IN]->(home_ls:LineUpStint)-[v:VS]-(opp_ls:LineUpStint)
+        
+        WITH ps, opp_ls, collect(v) AS vs_rels
+        
+        WITH ps, opp_ls,
+            reduce(s = 0, x IN vs_rels | s + x.clock_duration.seconds) AS total_seconds,
+            reduce(t = duration('PT0S'), x IN vs_rels | t + x.time_duration) AS total_time_duration
+
+        MERGE (ps)-[r:VS]->(opp_ls)
+        SET 
+            r.clock_duration = duration({seconds: total_seconds}),
+            r.time_duration = total_time_duration
     }
 """
