@@ -95,7 +95,6 @@ MERGE_PERIODS = """
 """
 
 
-
 MERGE_LINEUPS = """
     MATCH (g:Game {id: $game_id})
     MATCH (ht:Team)-[:PLAYED_HOME]->(g)
@@ -150,6 +149,7 @@ MERGE_LINEUPS = """
     // ==========================================
     // PHASE 2: CHRONOLOGICAL LINKING & DURATION
     // ==========================================
+
     CALL (g) {
         MATCH (p:Period)-[:IN]->(g)
         MATCH (t:Team)-[:PLAYED_HOME|PLAYED_AWAY]->(g)
@@ -159,9 +159,9 @@ MERGE_LINEUPS = """
         WITH t, p, collect(ls) AS stints
         
         UNWIND range(0, size(stints)-1) AS i
-        WITH stints, i, stints[i] AS current
+        WITH p, stints, i, stints[i] AS current
         
-        WITH i, current, stints,
+        WITH p, stints, i, current,
             CASE 
                 WHEN i < size(stints)-1 THEN stints[i+1] 
                 ELSE NULL 
@@ -174,13 +174,19 @@ MERGE_LINEUPS = """
         FOREACH (_ IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
             MERGE (current)-[:NEXT]->(next)
         )
-        SET current.duration = current.clock - end_clock
+        SET 
+            current.clock_duration = current.clock - end_clock,
+            current.time_duration = CASE 
+                WHEN next IS NOT NULL THEN duration.between(current.time, next.time)
+                ELSE duration.between(current.time, (p.start + p.duration))
+            END
     }
 
 
     // ==========================================
     // PHASE 3: OPPONENT LINKING (:VS)
     // ==========================================
+
     CALL (g) {
         MATCH (p:Period)-[:IN]->(g)
         WITH g, p, 
@@ -197,20 +203,117 @@ MERGE_LINEUPS = """
         MATCH (at)-[:TEAM_LINEUP]->(:LineUp)-[:HAD_STINT]->(as:LineUpStint)-[:IN]->(p)
         OPTIONAL MATCH (as)-[:NEXT]->(as_next)
 
-        WITH hs, as, p_end_global,
+        WITH hs, hs_next, as, as_next, p_end_global,
             hs.global_clock AS h_start, COALESCE(hs_next.global_clock, p_end_global) AS h_end,
             as.global_clock AS a_start, COALESCE(as_next.global_clock, p_end_global) AS a_end
 
         WHERE h_start < a_end AND a_start < h_end
         
-        WITH hs, as, 
+        WITH hs, hs_next, as, as_next,
             CASE WHEN h_start > a_start THEN h_start ELSE a_start END AS overlap_start,
             CASE WHEN h_end < a_end THEN h_end ELSE a_end END AS overlap_end
-
-        WITH hs, as, (overlap_end - overlap_start) AS seconds
+        
+        WITH hs, hs_next, as, as_next, (overlap_end - overlap_start) AS seconds
         WHERE seconds > 0
 
         MERGE (hs)-[r:VS]-(as)
-        SET r.duration = duration({seconds: seconds})
+        SET 
+            r.clock_duration = duration({seconds: seconds}),
+            r.time_duration = CASE 
+                WHEN hs_next IS NOT NULL AND as_next IS NOT NULL THEN 
+                    duration.between(
+                        CASE WHEN hs.time > as.time THEN hs.time ELSE as.time END,
+                        CASE WHEN hs_next.time < as_next.time THEN hs_next.time ELSE as_next.time END
+                    )
+                ELSE NULL
+            END
+    }
+
+
+    // ==========================================
+    // PHASE 4: PLAYER STINTS
+    // ==========================================
+
+    CALL (g) {
+        MATCH (p:Period)-[:IN]->(g)
+        
+        MATCH (t:Team)-[:TEAM_LINEUP]->(:LineUp)-[:HAD_STINT]->(start_ls:LineUpStint)-[:IN]->(p)
+        MATCH (player:Player)-[:IN]->(:LineUp)-[:HAD_STINT]->(start_ls)
+
+        WHERE NOT EXISTS {
+            MATCH (prev_ls)-[:NEXT]->(start_ls)
+            WHERE (player)-[:IN]->(:LineUp)-[:HAD_STINT]->(prev_ls)
+        }
+
+        MATCH path = (start_ls)-[:NEXT*0..]->(end_ls)
+        WHERE ALL(
+            ls IN nodes(path) WHERE EXISTS { 
+                (player)-[:IN]->(:LineUp)-[:HAD_STINT]->(ls)
+            }
+        )
+
+        AND NOT EXISTS {
+            MATCH (end_ls)-[:NEXT]->(next_ls)
+            WHERE (player)-[:IN]->(:LineUp)-[:HAD_STINT]->(next_ls)
+        }
+
+        WITH g, p, t, player, start_ls, nodes(path) AS sub_stints        
+        WITH g, p, t, player, sub_stints,
+            head(sub_stints) AS first,
+            last(sub_stints) AS last,
+            reduce(d = duration('PT0S'), s IN sub_stints | d + s.clock_duration) AS clock_duration
+
+        OPTIONAL MATCH (last)-[:NEXT]->(bench_ls)
+        MERGE (ps:PlayerStint {id: toString(g.id) + "_" + toString(player.id) + "_" + toString(p.n) + "_" + toString(first.global_clock)})
+        ON CREATE SET
+            ps.time = first.time,
+            ps.clock = first.clock,
+            ps.global_clock = first.global_clock,
+            ps.clock_duration = clock_duration,
+            ps.time_duration = CASE 
+                WHEN bench_ls IS NOT NULL THEN duration.between(first.time, bench_ls.time)
+                ELSE duration.between(first.time, (p.start + p.duration)) 
+            END
+        
+        MERGE (player)-[:HAD_STINT]->(ps)
+        MERGE (ps)-[:IN]->(p)
+        MERGE (ps)-[:FOR_TEAM]->(t)
+
+        FOREACH (sub_stint IN sub_stints |
+            MERGE (ps)-[:IN]->(sub_stint)
+        )
+    }
+
+
+    // ==========================================
+    // PHASE 5: LINK PLAYER STINTS (:NEXT)
+    // ==========================================
+
+    CALL (g) {
+        MATCH (player:Player)-[:HAD_STINT]->(ps:PlayerStint)
+        WHERE (ps)-[:IN]->(:Period)-[:IN]->(g)
+        
+        WITH player, ps
+        ORDER BY ps.global_clock ASC
+        
+        WITH player, collect(ps) AS stints
+        WHERE size(stints) > 1
+        
+        UNWIND range(0, size(stints)-2) AS i
+        WITH stints[i] AS current, stints[i+1] AS next
+        
+        WITH current, next, 
+            (next.global_clock - (current.global_clock + current.clock_duration.seconds)) AS clock_seconds_gap
+
+        WITH current, next, clock_seconds_gap,
+            CASE WHEN current.time_duration IS NOT NULL 
+                THEN duration.between((current.time + current.time_duration), next.time)
+                ELSE NULL 
+            END AS time_duration_gap
+                          
+        MERGE (current)-[r:NEXT]->(next)
+        SET 
+            r.clock_since = duration({seconds: clock_seconds_gap}),
+            r.time_since = time_duration_gap
     }
 """
