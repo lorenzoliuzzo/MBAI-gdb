@@ -45,6 +45,28 @@ def load_season(season_id):
 
 
 
+def load_lineups(session, game_id: int, subs: pd.DataFrame, starters: pd.DataFrame): 
+    print(f"Creating `LineUp`'s for `Game` {game_id}...")
+    
+    ht_id, at_id = get_teams(session, game_id)
+
+    ht_subs = subs[subs['teamId'] == ht_id]
+    at_subs = subs[subs['teamId'] == at_id]
+
+    ht_starter_ids = starters.loc[starters['TEAM_ID'] == ht_id, 'PLAYER_ID'].to_list()
+    at_starter_ids = starters.loc[starters['TEAM_ID'] == at_id, 'PLAYER_ID'].to_list()
+
+    MERGE_LINEUP_STINTS_TX = lambda tx:tx.run(MERGE_LINEUP_STINTS, game_id=game_id, 
+        home_lineups=extract_lineups(ht_subs, ht_starter_ids), 
+        away_lineups=extract_lineups(at_subs, at_starter_ids)
+    )
+    session.execute_write(MERGE_LINEUP_STINTS_TX)
+
+    MERGE_PLAYER_STINTS_TX = lambda tx:tx.run(MERGE_PLAYER_STINTS, game_id=game_id)
+    session.execute_write(MERGE_PLAYER_STINTS_TX)
+
+
+
 def load_game(season_id, game_id):
     driver = get_driver()
     if not driver:
