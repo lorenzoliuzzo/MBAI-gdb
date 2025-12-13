@@ -1,0 +1,22 @@
+title: MBAI Graph DB
+description: The Graph Database backend for the Money Ball AI project.
+url: https://lorenzoliuzzo.github.io/MBAI/MBAI-gdb
+
+theme: just-the-docs
+color_scheme: light
+
+gh_edit_link: true
+gh_edit_link_text: "Edit this page on GitHub"
+gh_repo_url: https://github.com/lorenzoliuzzo/MBAI-gdb
+
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  "MBAI": https://github.com/lorenzoliuzzo/MBAI 
+  "MBAI-gdb": https://github.com/lorenzoliuzzo/MBAI-gdb
+
+mermaid:
+  version: "10.9.1"
+
+last_edit_timestamp: true
