@@ -3,7 +3,7 @@ description: The Graph Database backend for the Money Ball AI project.
 url: https://lorenzoliuzzo.github.io/MBAI/MBAI-gdb
 
 theme: just-the-docs
-color_scheme: light
+color_scheme: dark
 
 gh_edit_link: true
 gh_edit_link_text: "Edit this page on GitHub"
