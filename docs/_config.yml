@@ -9,12 +9,14 @@ gh_edit_link: true
 gh_edit_link_text: "Edit this page on GitHub"
 gh_repo_url: https://github.com/lorenzoliuzzo/MBAI-gdb
 
-search_enabled: true
-heading_anchors: true
-
 aux_links:
   "MBAI": https://github.com/lorenzoliuzzo/MBAI 
   "MBAI-gdb": https://github.com/lorenzoliuzzo/MBAI-gdb
 
 mermaid:
   version: "10.9.1"
+
+search_enabled: true
+heading_anchors: true
+back_to_top: true
+back_to_top_text: "Back to top"

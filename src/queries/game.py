@@ -121,7 +121,7 @@ MERGE_STINTS = """
                 END,
                 ls.time = time
 
-            MERGE (l)-[:HAD_STINT]->(ls)-[:IN_PERIOD]->(p)
+            MERGE (l)-[:ON_COURT]->(ls)-[:IN_PERIOD]->(p)
 
             WITH p, ls
             ORDER BY ls.global_clock ASC
@@ -150,7 +150,7 @@ MERGE_STINTS = """
                 END
 
             FOREACH (_ IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
-                MERGE (current)-[:NEXT]->(next)
+                MERGE (current)-[:ON_COURT_NEXT]->(next)
             )
         
         }
@@ -163,8 +163,8 @@ MERGE_STINTS = """
         MATCH (p:Period)-[:IN_GAME]->(g)    
         MATCH (ht:Team)-[:PLAYED_HOME]->(g)
         MATCH (at:Team)-[:PLAYED_AWAY]->(g)
-        MATCH (ht)-[:HAS_LINEUP]->(:LineUp)-[:HAD_STINT]->(hs:LineUpStint)-[:IN_PERIOD]->(p)
-        MATCH (at)-[:HAS_LINEUP]->(:LineUp)-[:HAD_STINT]->(as:LineUpStint)-[:IN_PERIOD]->(p)
+        MATCH (ht)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(hs:LineUpStint)-[:IN_PERIOD]->(p)
+        MATCH (at)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(as:LineUpStint)-[:IN_PERIOD]->(p)
 
         WITH hs, as,
             hs.global_clock + hs.clock_duration AS hs_end,
@@ -199,7 +199,7 @@ MERGE_STINTS = """
     WITH distinct g
     CALL (g) {
         MATCH (t:Team)-[:PLAYED_HOME|PLAYED_AWAY]->(g)<-[:IN_GAME]-(p:Period)
-        MATCH (t)-[:HAS_LINEUP]->(l:LineUp)-[:HAD_STINT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
+        MATCH (t)-[:HAS_LINEUP]->(l:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
         MATCH (pl:Player)-[:MEMBER_OF]->(l)
 
         WITH g, p, t, pl, ls
@@ -239,7 +239,7 @@ MERGE_STINTS = """
 
 
         MERGE (ps:PlayerStint {id: ps_id})   
-        MERGE (pl)-[:HAD_STINT]->(ps)    
+        MERGE (pl)-[:ON_COURT]->(ps)    
         ON CREATE SET 
             ps.global_clock = first_ls.global_clock,
             ps._clock = first_ls._clock,
@@ -249,15 +249,15 @@ MERGE_STINTS = """
             ps.time_duration = total_time_duration
 
         FOREACH (sub IN sub_stints |
-            MERGE (ps)-[:APPEARS_IN]->(sub)
+            MERGE (ps)-[:ON_COURT_WITH]->(sub)
         )
     }
 
 
     WITH distinct g
     CALL (g) {
-        MATCH (p:Player)-[:HAD_STINT]->(ps:PlayerStint)
-        WHERE (ps)-[:APPEARS_IN]->(:LineUpStint)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g)
+        MATCH (p:Player)-[:ON_COURT]->(ps:PlayerStint)
+        WHERE (ps)-[:ON_COURT_WITH]->(:LineUpStint)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g)
         
         WITH DISTINCT p, ps
         ORDER BY ps.global_clock ASC
