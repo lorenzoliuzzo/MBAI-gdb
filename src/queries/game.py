@@ -121,7 +121,8 @@ MERGE_STINTS = """
                 END,
                 ls.time = time
 
-            MERGE (l)-[:ON_COURT]->(ls)-[:IN_PERIOD]->(p)
+            MERGE (l)-[:ON_COURT]->(ls)
+            MERGE (ls)-[:IN_PERIOD]->(p)
 
             WITH p, ls
             ORDER BY ls.global_clock ASC
@@ -273,4 +274,88 @@ MERGE_STINTS = """
             r.clock_since = next.global_clock - (current.global_clock + current.clock_duration),
             r.time_since = duration.between(current.time + current.time_duration, next.time)
     }
+"""
+
+
+MERGE_SHOTS = """
+    MATCH (g:Game {id: $game_id})
+    UNWIND $shots as shot
+
+    WITH g, shot, 
+        duration(shot.clock) AS clock_dur
+    
+    WITH g, shot, clock_dur,
+        CASE WHEN shot.period <= 4 
+            THEN shot.period * 720.0 - (clock_dur.milliseconds / 1000.0)
+            ELSE 2880.0 + (shot.period - 4) * 300.0 - (clock_dur.milliseconds / 1000.0)
+        END AS global_clock
+
+    WITH g, shot, global_clock,
+        toString(g.id) + "_" + \
+        toString(shot.period) + "_" + \
+        toString(global_clock) + \
+        "_shot_" + \
+        toString(shot.player_id) AS shot_id
+
+    MERGE (s:Action:Shot {id: shot_id})
+    ON CREATE SET 
+        s.time = datetime(shot.time),
+        s.clock = shot.clock,
+        s.global_clock = global_clock,
+        s.x = shot.x, 
+        s.y = shot.y,
+        s.distance = shot.distance
+
+    WITH g, s, shot, global_clock
+    MATCH (p:Period {n: shot.period})-[:IN_GAME]->(g)
+    MATCH (t:Team {id: shot.team_id})
+    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
+    WHERE ls.global_clock <= global_clock 
+        AND ls.global_clock + ls.clock_duration >= global_clock
+        
+    WITH g, s, shot, ls, p, t, global_clock
+    MATCH (:Player {id: shot.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)    
+    MERGE (ps)-[:TOOK]->(s)
+
+    // --- CRITICAL FIX ---
+    // You MUST have a WITH clause here to separate the MERGE above from the CALL below.
+    // We must also keep 'p' and 't' alive for the Block logic in the second CALL.
+    WITH shot, ls, s, p, t, global_clock
+
+    CALL (shot, ls, s) {
+        WITH shot, ls, s 
+        WHERE shot.assist_id IS NOT NULL
+        MATCH (assister:Player {id: shot.assist_id})
+        MATCH (assister)-[:ON_COURT]->(as:PlayerStint)-[:ON_COURT_WITH]->(ls)
+        MERGE (as)-[:ASSISTED]->(s)
+    }
+
+    // No WITH needed between unit subqueries (CALL ... CALL ...) in Neo4j 5.x
+    CALL (shot, p, s, global_clock, t) {
+        WITH shot, p, s, global_clock, t 
+        WHERE shot.block_id IS NOT NULL
+        
+        MATCH (ot:Team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ols:LineUpStint)-[:IN_PERIOD]->(p)
+        WHERE ot <> t 
+            AND ols.global_clock <= global_clock 
+            AND (ols.global_clock + ols.clock_duration) >= global_clock
+        
+        MATCH (blocker:Player {id: shot.block_id})
+        MATCH (blocker)-[:ON_COURT]->(bs:PlayerStint)-[:ON_COURT_WITH]->(ols)
+        MERGE (bs)-[:BLOCKED]->(s)
+    }
+
+    FOREACH (_ IN CASE WHEN shot.type = '2pt' THEN [1] ELSE [] END | 
+        SET s:`2PT`
+    )
+    FOREACH (_ IN CASE WHEN shot.type = '3pt' THEN [1] ELSE [] END | 
+        SET s:`3PT`
+    )
+    FOREACH (_ IN CASE WHEN shot.result = 'Made' THEN [1] ELSE [] END | 
+        SET s:Made
+    )
+    FOREACH (_ IN CASE WHEN shot.result = 'Missed' THEN [1] ELSE [] END | 
+        SET s:Missed
+    )
 """
