@@ -5,7 +5,12 @@ from neo4j.exceptions import ServiceUnavailable, CypherSyntaxError, CypherTypeEr
 from ..manager import BaseManager
 
 from ..fetcher import fetch_boxscore, fetch_pbp
-from ..queries.game import GET_TEAMS, MERGE_PERIODS, MERGE_STINTS, MERGE_SHOTS
+
+from ..queries.game import GET_TEAMS, \
+    MERGE_PERIODS, \
+    MERGE_STINTS, \
+    MERGE_SHOTS, \
+    MERGE_REBOUNDS
 
 
 class GameManager(BaseManager):
@@ -182,15 +187,22 @@ class GameManager(BaseManager):
     def load_actions(self, actions: pd.DataFrame) -> None:
         action_cols = ["actionType", "subType"]
         time_cols = ["timeActual", "period", "clock"]
-        id_cols = ["teamId", "personId", "assistPersonId", "blockPersonId"]
-        shot_cols = ["x", "y", "shotDistance", "shotResult"]
+        id_cols = ["teamId", "personId"]
+        shot_cols = ["assistPersonId", "blockPersonId", "x", "y", "shotDistance", "shotResult"]
 
         mask_2pt = actions["actionType"] == "2pt"
         mask_3pt = actions["actionType"] == "3pt"
+        mask_reb = actions["actionType"] == "rebound"
 
         self.load_shots(
             shots = actions.loc[mask_2pt | mask_3pt,
                 action_cols + time_cols + id_cols + shot_cols
+            ]
+        )
+
+        self.load_rebounds(
+            rebounds = actions.loc[mask_reb, 
+                action_cols + time_cols + id_cols
             ]
         )
 
@@ -218,3 +230,22 @@ class GameManager(BaseManager):
 
         params = {"game_id": self.game_id, "shots": data}
         self.execute_write(MERGE_SHOTS, params)
+
+
+    def load_rebounds(self, rebounds: pd.DataFrame) -> None:
+        data = []
+        for _, reb in rebounds.iterrows():
+            reb_entry = {
+                "type": reb["actionType"],
+                "subtype": reb["subType"],
+                "time": pd.to_datetime(reb["timeActual"]),
+                "period": int(reb["period"]),
+                "clock": reb["clock"],
+                "team_id": int(reb["teamId"]),
+                "player_id": int(reb["personId"])
+            }
+
+            data.append(reb_entry)
+
+        params = {"game_id": self.game_id, "rebounds": data}
+        self.execute_write(MERGE_REBOUNDS, params)

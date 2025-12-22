@@ -318,9 +318,6 @@ MERGE_SHOTS = """
     WHERE (ps)-[:ON_COURT_WITH]->(ls)    
     MERGE (ps)-[:TOOK]->(s)
 
-    // --- CRITICAL FIX ---
-    // You MUST have a WITH clause here to separate the MERGE above from the CALL below.
-    // We must also keep 'p' and 't' alive for the Block logic in the second CALL.
     WITH shot, ls, s, p, t, global_clock
 
     CALL (shot, ls, s) {
@@ -331,7 +328,6 @@ MERGE_SHOTS = """
         MERGE (as)-[:ASSISTED]->(s)
     }
 
-    // No WITH needed between unit subqueries (CALL ... CALL ...) in Neo4j 5.x
     CALL (shot, p, s, global_clock, t) {
         WITH shot, p, s, global_clock, t 
         WHERE shot.block_id IS NOT NULL
@@ -358,4 +354,64 @@ MERGE_SHOTS = """
     FOREACH (_ IN CASE WHEN shot.result = 'Missed' THEN [1] ELSE [] END | 
         SET s:Missed
     )
+"""
+
+
+MERGE_REBOUNDS = """
+    MATCH (g:Game {id: $game_id})
+    UNWIND $rebounds as reb
+
+    WITH g, reb, 
+        duration(reb.clock) AS clock
+    
+    WITH g, reb, clock,
+        CASE WHEN reb.period <= 4 
+            THEN 720.0 - clock.milliseconds / 1000.0
+            ELSE 300.0 - clock.milliseconds / 1000.0
+        END AS local_clock,
+        CASE WHEN reb.period <= 4 
+            THEN reb.period * 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 2880.0 + (reb.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
+        END AS global_clock
+
+    WITH g, reb, clock, local_clock, global_clock,
+        toString(g.id) + "_" + \
+        toString(reb.period) + "_" + \
+        toString(global_clock) + \
+        "_reb_" + \
+        toString(reb.player_id) AS reb_id
+
+    MERGE (r:Action:Rebound {id: reb_id})
+    ON CREATE SET 
+        r.time = datetime(reb.time),
+        r._clock = clock,
+        r.clock = local_clock,
+        r.global_clock = global_clock
+
+    FOREACH (_ IN CASE WHEN reb.subtype = 'defensive' THEN [1] ELSE [] END | 
+        SET r:Defensive
+    )
+    FOREACH (_ IN CASE WHEN reb.subtype = 'offensive' THEN [1] ELSE [] END | 
+        SET r:Offensive
+    )
+
+    WITH g, r, reb, global_clock
+    MATCH (p:Period {n: reb.period})-[:IN_GAME]->(g)
+    MATCH (t:Team {id: reb.team_id})
+    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
+    WHERE ls.global_clock <= global_clock 
+        AND ls.global_clock + ls.clock_duration >= global_clock
+        
+    WITH r, reb, ls
+    OPTIONAL MATCH (:Player {id: reb.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)
+
+    WITH r, reb, ls, ps
+    FOREACH (_ IN CASE WHEN ps IS NOT NULL THEN [1] ELSE [] END | 
+        MERGE (ps)-[:TOOK]->(r)
+    )
+    FOREACH (_ IN CASE WHEN reb.player_id = 0 THEN [1] ELSE [] END | 
+        MERGE (ls)-[:TOOK]->(r)
+    )
+
 """
