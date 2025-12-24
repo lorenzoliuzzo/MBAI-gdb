@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 from .driver import get_driver
-
+from .queries.setup import SETUP_QUERIES
 
 class BaseManager:
     """
@@ -14,6 +14,13 @@ class BaseManager:
         if self.driver is None:
             print("")
             raise Exception()
+
+        with self.driver.session() as session:
+            for query in SETUP_QUERIES:
+                try:
+                    session.run(query)
+                except Exception as e:
+                    print(f"Error creating constraint: {e}")
 
 
     def execute_write(self, query: str, params: Optional[Dict[str, Any]] = None) -> Any:

@@ -1,6 +1,5 @@
 import pandas as pd
 from typing import List, Dict
-from tqdm import tqdm
 from time import sleep
 
 from nba_api.stats.static import teams
@@ -21,7 +20,7 @@ def fetch_teams():
     print(f"Got {n_teams} teams. Now fetching arena for each...")
 
     team_data_list = []
-    for team in tqdm(all_teams):
+    for team in all_teams:
         try:
             team_details = TeamDetails(team['id']).get_dict()
             background = team_details["resultSets"][0]
@@ -101,4 +100,16 @@ def fetch_boxscore(game_id: int) -> pd.DataFrame:
 def fetch_pbp(game_id: int) -> pd.DataFrame:
     pbp = PlayByPlay(game_id=f"00{game_id}").get_dict()
     df = pd.DataFrame(pbp["game"]["actions"])
-    return df.sort_values(by="timeActual", ascending=True)
+
+    id_cols = df.filter(regex="Id$").columns
+    df[id_cols] = df[id_cols].astype("UInt32")
+    df["timeActual"] = pd.to_datetime(df["timeActual"])
+    df["period"] = df["period"].astype("uint8")
+    df["actionType"] = df["actionType"].astype("string") 
+    df["subType"] = df["subType"].astype("string") 
+    df["descriptor"] = df["descriptor"].astype("string") 
+    df["x"] = df["x"].astype("float16")
+    df["y"] = df["y"].astype("float16")
+    df["shotDistance"] = df["shotDistance"].astype("float16")
+
+    return df.sort_values(by="timeActual", ascending=True).fillna(-1, axis=1)

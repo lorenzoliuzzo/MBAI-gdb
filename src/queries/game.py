@@ -1,19 +1,3 @@
-SETUP_QUERIES = [
-    "CREATE CONSTRAINT team_id IF NOT EXISTS FOR (t:Team) REQUIRE t.id IS UNIQUE",
-    "CREATE CONSTRAINT player_id IF NOT EXISTS FOR (p:Player) REQUIRE p.id IS UNIQUE",
-    "CREATE CONSTRAINT arena_name IF NOT EXISTS FOR (a:Arena) REQUIRE a.name IS UNIQUE",
-    "CREATE CONSTRAINT city_name IF NOT EXISTS FOR (c:City) REQUIRE c.name IS UNIQUE",
-    "CREATE CONSTRAINT state_name IF NOT EXISTS FOR (s:State) REQUIRE s.name IS UNIQUE",
-    "CREATE CONSTRAINT season_id IF NOT EXISTS FOR (s:Season) REQUIRE s.id IS UNIQUE",
-    "CREATE CONSTRAINT game_id IF NOT EXISTS FOR (g:Game) REQUIRE g.id IS UNIQUE",
-    "CREATE INDEX IF NOT EXISTS FOR (g:Game) ON (g.date)",
-    "CREATE CONSTRAINT lineup_id IF NOT EXISTS FOR (l:LineUp) REQUIRE l.id IS UNIQUE",
-    "CREATE CONSTRAINT lineup_stint_id IF NOT EXISTS FOR (ls:LineUpStint) REQUIRE ls.id IS UNIQUE",
-    "CREATE CONSTRAINT player_stint_id IF NOT EXISTS FOR (ps:PlayerStint) REQUIRE ps.id IS UNIQUE",
-    "CREATE INDEX ls_timeline IF NOT EXISTS FOR (ls:LineUpStint) ON (ls.global_clock)",
-    "CREATE INDEX ps_timeline IF NOT EXISTS FOR (ps:PlayerStint) ON (ps.global_clock)",
-]
-
 GET_TEAMS = """
     MATCH (g:Game {id: $game_id})
     MATCH (ht)-[:PLAYED_HOME]->(g)
@@ -277,30 +261,121 @@ MERGE_STINTS = """
 """
 
 
+MERGE_FOULS = """
+    MATCH (g:Game {id: $game_id})
+    UNWIND $fouls AS foul
+
+    WITH g, foul, 
+        duration(foul.clock) AS clock
+    
+    WITH g, foul, clock,
+        CASE WHEN foul.period <= 4 
+            THEN 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 300.0 - (clock.milliseconds / 1000.0)
+        END AS local_clock,
+        CASE WHEN foul.period <= 4 
+            THEN foul.period * 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 2880.0 + (foul.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
+        END AS global_clock
+
+    WITH g, foul, clock, local_clock, global_clock,
+        toString(g.id) + "_" + 
+        toString(foul.period) + "_" + 
+        foul.clock + 
+        "_foul_" + 
+        COALESCE(toString(NULLIF(foul.player_id, 0)), toString(foul.team_id)) AS foul_id
+
+    MERGE (f:Action:Foul {id: foul_id})
+    ON CREATE SET 
+        f.time = datetime(foul.time),
+        f._clock = clock,
+        f.local_clock = local_clock,
+        f.global_clock = global_clock
+
+    FOREACH (_ IN CASE WHEN foul.subtype = 'offensive' THEN [1] ELSE [] END | 
+        SET f:Offensive
+    )
+    FOREACH (_ IN CASE WHEN foul.subtype = 'technical' THEN [1] ELSE [] END | 
+        SET f:Technical
+    )
+    FOREACH (_ IN CASE WHEN foul.subtype = 'personal' THEN [1] ELSE [] END | 
+        SET f:Personal
+    )
+    FOREACH (_ IN CASE WHEN foul.subtype = 'flagrant' THEN [1] ELSE [] END | 
+        SET f:Flagrant
+    )
+
+    WITH g, f, foul, global_clock
+    MATCH (p:Period {n: foul.period})-[:IN_GAME]->(g)
+    MATCH (t:Team {id: foul.team_id})
+    
+    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
+    WHERE ls.global_clock <= global_clock 
+        AND ls.global_clock + ls.clock_duration >= global_clock
+
+    CALL (foul, f, ls) {
+        WITH foul, f, ls
+        MATCH (pl:Player {id: foul.player_id})
+        MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
+        MERGE (ps)-[:COMMITTED_FOUL]->(f)
+    }
+
+    CALL (foul, f, ls) {
+        WITH foul, f, ls
+        WHERE foul.player_id = 0 
+            OR foul.player_id IS NULL 
+            OR foul.player_id = foul.team_id
+        
+        MERGE (ls)-[:TEAM_COMMITTED_FOUL]->(f)
+    }
+
+    WITH g, f, foul, p, global_clock
+    
+    CALL (g, f, foul, p, global_clock) {
+        WITH g, f, foul, p, global_clock
+        WHERE foul.drawn_id IS NOT NULL AND foul.drawn_id <> 0
+        
+        MATCH (victim:Player {id: foul.drawn_id})
+        MATCH (victim)-[:ON_COURT]->(v_ps:PlayerStint)
+        
+        MATCH (v_ps)-[:ON_COURT_WITH]->(v_ls:LineUpStint)-[:IN_PERIOD]->(p)
+        WHERE v_ls.global_clock <= global_clock 
+            AND (v_ls.global_clock + v_ls.clock_duration) >= global_clock
+
+        MERGE (v_ps)-[:DREW_FOUL]->(f)
+    }
+"""
+
+
 MERGE_SHOTS = """
     MATCH (g:Game {id: $game_id})
     UNWIND $shots as shot
 
     WITH g, shot, 
-        duration(shot.clock) AS clock_dur
+        duration(shot.clock) AS clock
     
-    WITH g, shot, clock_dur,
+    WITH g, shot, clock,
         CASE WHEN shot.period <= 4 
-            THEN shot.period * 720.0 - (clock_dur.milliseconds / 1000.0)
-            ELSE 2880.0 + (shot.period - 4) * 300.0 - (clock_dur.milliseconds / 1000.0)
+            THEN 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 300.0 - (clock.milliseconds / 1000.0)
+        END AS local_clock,
+        CASE WHEN shot.period <= 4 
+            THEN shot.period * 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 2880.0 + (shot.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
         END AS global_clock
 
-    WITH g, shot, global_clock,
+    WITH g, shot, clock, local_clock, global_clock,
         toString(g.id) + "_" + \
         toString(shot.period) + "_" + \
-        toString(global_clock) + \
+        shot.clock + \
         "_shot_" + \
         toString(shot.player_id) AS shot_id
 
     MERGE (s:Action:Shot {id: shot_id})
     ON CREATE SET 
         s.time = datetime(shot.time),
-        s.clock = shot.clock,
+        s._clock = clock,
+        s.local_clock = local_clock,
         s.global_clock = global_clock,
         s.x = shot.x, 
         s.y = shot.y,
@@ -316,11 +391,8 @@ MERGE_SHOTS = """
     WITH g, s, shot, ls, p, t, global_clock
     MATCH (:Player {id: shot.player_id})-[:ON_COURT]->(ps:PlayerStint)
     WHERE (ps)-[:ON_COURT_WITH]->(ls)    
-    MERGE (ps)-[:TOOK]->(s)
+    MERGE (ps)-[:SHOT]->(s)
 
-    // --- CRITICAL FIX ---
-    // You MUST have a WITH clause here to separate the MERGE above from the CALL below.
-    // We must also keep 'p' and 't' alive for the Block logic in the second CALL.
     WITH shot, ls, s, p, t, global_clock
 
     CALL (shot, ls, s) {
@@ -331,7 +403,6 @@ MERGE_SHOTS = """
         MERGE (as)-[:ASSISTED]->(s)
     }
 
-    // No WITH needed between unit subqueries (CALL ... CALL ...) in Neo4j 5.x
     CALL (shot, p, s, global_clock, t) {
         WITH shot, p, s, global_clock, t 
         WHERE shot.block_id IS NOT NULL
@@ -358,4 +429,286 @@ MERGE_SHOTS = """
     FOREACH (_ IN CASE WHEN shot.result = 'Missed' THEN [1] ELSE [] END | 
         SET s:Missed
     )
+"""
+
+
+MERGE_FREETHROWS = """
+    MATCH (g:Game {id: $game_id})
+    UNWIND range(0, size($shots)-1) as i
+    WITH g, $shots[i] as ft, i
+
+    WITH g, ft, i,
+        duration(ft.clock) AS clock
+    
+    WITH g, ft, i, clock,
+        CASE WHEN ft.period <= 4 
+            THEN 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 300.0 - (clock.milliseconds / 1000.0)
+        END AS local_clock,
+        CASE WHEN ft.period <= 4 
+            THEN ft.period * 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 2880.0 + (ft.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
+        END AS global_clock
+
+    WITH g, ft, i, clock, local_clock, global_clock,
+        toString(g.id) + "_" + 
+        toString(ft.period) + "_" + 
+        ft.clock + 
+        "_ft_" + 
+        toString(ft.player_id) + "_" + 
+        toString(i) AS ft_id
+
+    MERGE (s:Action:Shot:FreeThrow {id: ft_id})
+    ON CREATE SET 
+        s.time = datetime(ft.time),
+        s._clock = clock,
+        s.local_clock = local_clock,
+        s.global_clock = global_clock
+
+    FOREACH (_ IN CASE WHEN ft.result = 'Made' THEN [1] ELSE [] END | 
+        SET s:Made
+    )
+    FOREACH (_ IN CASE WHEN ft.result = 'Missed' THEN [1] ELSE [] END | 
+        SET s:Missed
+    )
+
+    WITH g, s, ft, global_clock
+    MATCH (p:Period {n: ft.period})-[:IN_GAME]->(g)
+    MATCH (t:Team {id: ft.team_id})
+    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
+    WHERE ls.global_clock <= global_clock 
+        AND ls.global_clock + ls.clock_duration >= global_clock
+        
+    WITH g, s, ft, ls, p, t, global_clock
+    MATCH (:Player {id: ft.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)    
+    MERGE (ps)-[:SHOT]->(s)
+
+    WITH g, s, global_clock
+    
+    MATCH (f:Action:Foul)
+    WHERE f.id STARTS WITH toString(g.id) 
+        AND f.global_clock = global_clock
+    
+    MERGE (f)-[:CAUSED]->(s)
+"""
+
+
+MERGE_REBOUNDS = """
+    MATCH (g:Game {id: $game_id})
+    UNWIND $rebounds AS reb
+
+    WITH g, reb, 
+        duration(reb.clock) AS clock
+    
+    WITH g, reb, clock,
+        CASE WHEN reb.period <= 4 
+            THEN 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 300.0 - (clock.milliseconds / 1000.0)
+        END AS local_clock,
+        CASE WHEN reb.period <= 4 
+            THEN reb.period * 720.0 - (clock.milliseconds / 1000.0)
+            ELSE 2880.0 + (reb.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
+        END AS global_clock
+
+    WITH g, reb, clock, local_clock, global_clock,
+        toString(g.id) + "_" + 
+        toString(reb.period) + "_" + 
+        reb.clock + 
+        "_reb_" + 
+        COALESCE(toString(NULLIF(reb.player_id, 0)), toString(reb.team_id)) AS reb_id
+
+    MERGE (r:Action:Rebound {id: reb_id})
+    ON CREATE SET 
+        r.time = datetime(reb.time),
+        r._clock = clock,
+        r.local_clock = local_clock,
+        r.global_clock = global_clock
+
+    FOREACH (_ IN CASE WHEN reb.subtype = 'offensive' THEN [1] ELSE [] END | 
+        SET r:Offensive
+    )
+    FOREACH (_ IN CASE WHEN reb.subtype = 'defensive' THEN [1] ELSE [] END | 
+        SET r:Defensive
+    )
+
+    WITH g, r, reb, global_clock
+    MATCH (p:Period {n: reb.period})-[:IN_GAME]->(g)
+    MATCH (t:Team {id: reb.team_id})
+    
+    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
+    WHERE ls.global_clock <= global_clock 
+        AND ls.global_clock + ls.clock_duration >= global_clock
+        
+    CALL (reb, r, ls) {
+        WITH reb, r, ls
+        MATCH (pl:Player {id: reb.player_id}) 
+        MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
+        MERGE (ps)-[:REBOUNDED]->(r)
+    }
+
+    CALL (reb, r, ls) {
+        WITH reb, r, ls
+        WHERE reb.player_id = 0 OR reb.player_id IS NULL 
+        MERGE (ls)-[:REBOUNDED]->(r)
+    }
+
+    WITH g, r, global_clock
+    CALL (g, r, global_clock) {
+        WITH g, r, global_clock
+        
+        MATCH (s:Shot:Missed)
+        WHERE s.id STARTS WITH toString(g.id) 
+            AND s.global_clock <= global_clock
+            AND s.global_clock >= global_clock - 15.0
+            AND NOT EXISTS {
+                MATCH (other:Rebound)-[:REBOUND_OF]->(s)
+                WHERE other.id <> r.id
+            }
+        
+        WITH s ORDER BY s.global_clock DESC LIMIT 1
+        MERGE (r)-[:REBOUND_OF]->(s)
+    }
+"""
+
+
+MERGE_SCORES = """
+    MATCH (g:Game {id: $game_id})
+    MATCH (home:Team)-[:PLAYED_HOME]->(g)
+    MATCH (away:Team)-[:PLAYED_AWAY]->(g)
+    
+    MATCH (scoring_team:Team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(scoring_ls:LineUpStint)<-[:ON_COURT_WITH]-(:PlayerStint)-[:SHOT]->(s:Shot:Made)
+    MATCH (scoring_ls)-[:IN_PERIOD]->(p:Period)-[:IN_GAME]->(g)
+    
+    WHERE scoring_ls.global_clock <= s.global_clock
+        AND (scoring_ls.global_clock + scoring_ls.clock_duration) >= s.global_clock
+
+    MATCH (opp_team:Team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(opp_ls:LineUpStint)-[:IN_PERIOD]->(p)
+    WHERE opp_team.id <> scoring_team.id
+        AND opp_ls.global_clock <= s.global_clock
+        AND (opp_ls.global_clock + opp_ls.clock_duration) >= s.global_clock
+
+    WITH g, home, away, s, p, scoring_team, 
+        CASE WHEN scoring_team.id = home.id THEN scoring_ls ELSE opp_ls END AS home_stint,
+        CASE WHEN scoring_team.id = away.id THEN scoring_ls ELSE opp_ls END AS away_stint,
+        CASE 
+            WHEN 'FreeThrow' IN labels(s) THEN 1 
+            WHEN '2PT' IN labels(s) THEN 2 
+            WHEN '3PT' IN labels(s) THEN 3 
+            ELSE 0 
+        END AS points
+    
+    ORDER BY s.global_clock ASC, s.id ASC
+
+    WITH g, 
+        home.id AS home_id,
+        collect({
+            period: p,
+            home_stint: home_stint,
+            away_stint: away_stint,
+            shot: s,
+            points: points,
+            team_id: scoring_team.id
+        }) AS events
+
+    WITH g,
+        reduce(
+            acc = {
+                chain: [],
+                home_score: 0,
+                away_score: 0,
+                p_home_score: 0,
+                p_away_score: 0,
+                current_p: 0
+            }, event IN events |
+            CASE 
+                WHEN event.period.n <> acc.current_p 
+                THEN {
+                    p_home_score: CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END,
+                    p_away_score: CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END,
+                    current_p: event.period.n,
+                    
+                    home_score: acc.home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END),
+                    away_score: acc.away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END),
+                    
+                    chain: acc.chain + {
+                        id: event.shot.id + "_score",
+                        period: event.period,
+                        shot: event.shot,
+                        points: event.points,
+                        home_stint: event.home_stint,
+                        away_stint: event.away_stint,
+                        scoring_team_id: event.team_id,
+                        
+                        home_score: acc.home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END),
+                        away_score: acc.away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END),
+                        margin: (acc.home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END)) - (acc.away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END)),
+                        
+                        period_home_score: CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END,
+                        period_away_score: CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END,
+                        period_margin: (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END) - (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END)
+                    }
+                }
+                
+                ELSE {
+                    p_home_score: acc.p_home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END),
+                    p_away_score: acc.p_away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END),
+                    current_p: acc.current_p,
+                    
+                    home_score: acc.home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END),
+                    away_score: acc.away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END),
+                    
+                    chain: acc.chain + {
+                        id: event.shot.id + "_score",
+                        period: event.period,
+                        shot: event.shot,
+                        points: event.points,
+                        home_stint: event.home_stint,
+                        away_stint: event.away_stint,
+                        scoring_team_id: event.team_id,
+                        
+                        home_score: acc.home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END),
+                        away_score: acc.away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END),
+                        margin: (acc.home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END)) - (acc.away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END)),
+
+                        period_home_score: acc.p_home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END),
+                        period_away_score: acc.p_away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END),
+                        period_margin: (acc.p_home_score + (CASE WHEN event.team_id = home_id THEN event.points ELSE 0 END)) - (acc.p_away_score + (CASE WHEN event.team_id <> home_id THEN event.points ELSE 0 END))
+                    }
+                }
+            END
+        ).chain AS calculated_chain
+
+    UNWIND calculated_chain AS item
+    WITH calculated_chain, item, 
+        item.shot AS s, 
+        item.home_stint AS hls,
+        item.away_stint AS als
+        
+    
+    MERGE (sc:Score {id: item.id})
+    ON CREATE SET
+        sc.home_score = item.home_score,
+        sc.away_score = item.away_score,
+        sc.margin = item.margin,
+        sc.period_home_score = item.period_home_score,
+        sc.period_away_score = item.period_away_score,
+        sc.period_margin = item.period_margin,
+        sc.global_clock = s.global_clock,
+        sc.local_clock = s.local_clock,
+        sc.time = s.time
+
+    MERGE (s)-[:GENERATED_SCORE]->(sc)
+    MERGE (sc)-[:AT_STINT]->(hls)
+    MERGE (sc)-[:AT_STINT]->(als)
+
+    WITH calculated_chain
+    UNWIND range(0, size(calculated_chain)-2) AS i
+    WITH 
+        calculated_chain[i] AS current, 
+        calculated_chain[i+1] AS next
+    
+    MATCH (c:Score {id: current.id})
+    MATCH (n:Score {id: next.id})
+    MERGE (c)-[:NEXT]->(n)
 """

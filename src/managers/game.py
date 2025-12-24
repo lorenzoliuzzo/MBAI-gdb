@@ -1,11 +1,16 @@
-from typing import List, Tuple, Optional
+from typing import Tuple, List, Dict, Optional, Any
 import pandas as pd
 from neo4j.exceptions import ServiceUnavailable, CypherSyntaxError, CypherTypeError
 
 from ..manager import BaseManager
 
 from ..fetcher import fetch_boxscore, fetch_pbp
-from ..queries.game import GET_TEAMS, MERGE_PERIODS, MERGE_STINTS, MERGE_SHOTS
+from ..queries.game import \
+    GET_TEAMS, \
+    MERGE_PERIODS, MERGE_STINTS, \
+    MERGE_SHOTS, MERGE_FREETHROWS, \
+    MERGE_REBOUNDS, MERGE_FOULS, \
+    MERGE_SCORES
 
 
 class GameManager(BaseManager):
@@ -38,6 +43,7 @@ class GameManager(BaseManager):
             raise
 
 
+
     def load_game(self) -> None:
 
         ht_id, at_id = self.team_ids
@@ -45,7 +51,6 @@ class GameManager(BaseManager):
 
         try: 
             boxscore_df = fetch_boxscore(self.game_id)
-        
         except Exception as e: 
             print(f"⛔ Critical failure in `load_game` for ID {self.game_id}: couldn't fetch the boxscore: {e}")
             return None
@@ -180,41 +185,58 @@ class GameManager(BaseManager):
 
 
     def load_actions(self, actions: pd.DataFrame) -> None:
-        action_cols = ["actionType", "subType"]
-        time_cols = ["timeActual", "period", "clock"]
-        id_cols = ["teamId", "personId", "assistPersonId", "blockPersonId"]
-        shot_cols = ["x", "y", "shotDistance", "shotResult"]
 
-        mask_2pt = actions["actionType"] == "2pt"
-        mask_3pt = actions["actionType"] == "3pt"
-
-        self.load_shots(
-            shots = actions.loc[mask_2pt | mask_3pt,
-                action_cols + time_cols + id_cols + shot_cols
-            ]
-        )
-
-    
-    def load_shots(self, shots: pd.DataFrame) -> None:
-        data = []
-        for _, shot in shots.fillna(-1, axis=1).iterrows():
-            shot_entry = {
-                "type": shot["actionType"],
-                "subtype": shot["subType"],
-                "time": pd.to_datetime(shot["timeActual"]),
-                "period": int(shot["period"]),
-                "clock": shot["clock"],
-                "team_id": int(shot["teamId"]) if shot["teamId"] != -1 else None,
-                "player_id": int(shot["personId"]) if shot["personId"] != -1 else None,
-                "result": shot["shotResult"],
-                "x": float(shot["x"]) if shot["x"] != -1 else None,
-                "y": float(shot["y"]) if shot["y"] != -1 else None,
-                "distance": float(shot["shotDistance"]) if shot["shotDistance"] != -1 else None, 
-                "assist_id": int(shot["assistPersonId"]) if shot["assistPersonId"] != -1 else None,
-                "block_id": int(shot["blockPersonId"]) if shot["blockPersonId"] != -1 else None,   
+        def process_action(row) -> Dict[str, Any]:
+            return {
+                "time": row["timeActual"],
+                "period": row["period"],
+                "clock": row["clock"],
+                "type": row["actionType"],
+                "subtype": row["subType"],
+                "team_id": row["teamId"] if row["teamId"] != -1 else None,
+                "player_id": row["personId"] if row["personId"] != -1 else None,
             }
 
-            data.append(shot_entry)
+        def process_foul(row) -> Dict[str, Any]:
+            entry = process_action(row)
+            entry.update({"drawn_id": row["foulDrawnPersonId"] if row["foulDrawnPersonId"] != -1 else None})
+            return entry
+                
+        def process_shot(row) -> Dict[str, Any]:
+            entry = process_action(row)
+            entry.update({
+                "result": row["shotResult"],
+                "x": row["x"], "y": row["y"],
+                "distance": row["shotDistance"],
+                "assist_id": row["assistPersonId"] if row["assistPersonId"] != -1 else None,
+                "block_id": row["blockPersonId"] if row["blockPersonId"] != -1 else None,   
+            })
+            return entry
+        
+        def process_freethrow(row) -> Dict[str, Any]:
+            entry = process_action(row)
+            entry.update({"result": row["shotResult"]})
+            return entry
 
-        params = {"game_id": self.game_id, "shots": data}
-        self.execute_write(MERGE_SHOTS, params)
+
+        foul_mask = actions["actionType"] == "foul"
+        foul_data = actions[foul_mask].apply(process_foul, axis=1).tolist()
+        foul_params = {"game_id": self.game_id, "fouls": foul_data}
+        self.execute_write(MERGE_FOULS, foul_params)
+
+        shot_mask = (actions["actionType"] == "2pt") | (actions["actionType"] == "3pt")
+        shot_data = actions[shot_mask].apply(process_shot, axis=1).tolist()
+        shot_params = {"game_id": self.game_id, "shots": shot_data}
+        self.execute_write(MERGE_SHOTS, shot_params)
+
+        ft_mask = actions["actionType"] == "freethrow"
+        ft_data = actions[ft_mask].apply(process_freethrow, axis=1).tolist()
+        ft_params = {"game_id": self.game_id, "shots": ft_data}
+        self.execute_write(MERGE_FREETHROWS, ft_params)
+
+        reb_mask = actions["actionType"] == "rebound"
+        reb_data = actions[reb_mask].apply(process_action, axis=1).tolist()
+        reb_params = {"game_id": self.game_id, "rebounds": reb_data}
+        self.execute_write(MERGE_REBOUNDS, reb_params)
+
+        self.execute_write(MERGE_SCORES, {"game_id": self.game_id})
