@@ -8,9 +8,9 @@ from ..fetcher import fetch_boxscore, fetch_pbp
 from ..queries.game import \
     GET_TEAMS, \
     MERGE_PERIODS, MERGE_STINTS, \
-    MERGE_JUMPBALLS, \
+    MERGE_JUMPBALLS, MERGE_VIOLATIONS, MERGE_FOULS, \
     MERGE_SHOTS, MERGE_FREETHROWS, \
-    MERGE_REBOUNDS, MERGE_FOULS, MERGE_TURNOVERS, \
+    MERGE_REBOUNDS, MERGE_TURNOVERS, \
     MERGE_SCORES, SET_PLUS_MINUS
 
 
@@ -229,7 +229,13 @@ class GameManager(BaseManager):
             })
             return entry
 
-
+        def process_violation(row) -> Dict[str, Any]:
+            entry = process_action(row)
+            entry.update({
+                "official_id": row["officialId"] if row["officialId"] != -1 else None
+            })
+            return entry
+                
         def process_foul(row) -> Dict[str, Any]:
             entry = process_action(row)
             entry.update({
@@ -265,11 +271,16 @@ class GameManager(BaseManager):
             })
             return entry
         
-        
+
         jumpball_mask = actions["actionType"] == "jumpball"
         jumpball_data = actions[jumpball_mask].apply(process_jumpball, axis=1)
         jumpball_params = {"game_id": self.game_id, "jumpballs": jumpball_data.tolist()}
         self.execute_write(MERGE_JUMPBALLS, jumpball_params)
+
+        violation_mask = actions["actionType"] == "violation"
+        violation_data = actions[violation_mask].apply(process_violation, axis=1)
+        violation_params = {"game_id": self.game_id, "violations": violation_data.tolist()}
+        self.execute_write(MERGE_VIOLATIONS, violation_params)
 
         foul_mask = actions["actionType"] == "foul"
         foul_data = actions[foul_mask].apply(process_foul, axis=1)

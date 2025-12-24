@@ -318,6 +318,51 @@ MERGE_JUMPBALLS = """
 """
 
 
+MERGE_VIOLATIONS = """
+    MATCH (g:Game {id: $game_id})
+    UNWIND $violations AS vio
+
+    WITH g, vio,
+        toString(g.id) + "_" + toString(vio.period) + "_" + vio.clock + "_violation_" + 
+        COALESCE(toString(NULLIF(vio.player_id, 0)), toString(vio.team_id)) AS vio_id
+
+    MERGE (v:Action:Violation {id: vio_id})
+    ON CREATE SET 
+        v.time = datetime(vio.time),
+        v.clock = duration(vio.clock),
+        v.local_clock = vio.local_clock,
+        v.global_clock = vio.global_clock
+
+    FOREACH (_ IN CASE WHEN vio.subtype = 'kicked ball' THEN [1] ELSE [] END | SET v:KickedBall)
+    FOREACH (_ IN CASE WHEN vio.subtype = 'delay-of-game' THEN [1] ELSE [] END | SET v:DelayOfGame)
+    FOREACH (_ IN CASE WHEN vio.subtype = 'lane' THEN [1] ELSE [] END | SET v:LaneViolation)
+    FOREACH (_ IN CASE WHEN vio.subtype = 'goaltending' THEN [1] ELSE [] END | SET v:Goaltending)
+    FOREACH (_ IN CASE WHEN vio.subtype = 'defensive goaltending' THEN [1] ELSE [] END | SET v:DefensiveGoaltending)
+    FOREACH (_ IN CASE WHEN vio.subtype = 'double dribble' THEN [1] ELSE [] END | SET v:DoubleDribble)
+    FOREACH (_ IN CASE WHEN vio.subtype = 'jump ball' THEN [1] ELSE [] END | SET v:JumpBallViolation)
+
+    WITH g, v, vio
+    MATCH (p:Period {n: vio.period})-[:IN_GAME]->(g)
+    MATCH (team:Team {id: vio.team_id})
+    
+    MATCH (team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
+    WHERE ls.global_clock <= vio.global_clock 
+        AND (ls.global_clock + ls.clock_duration) >= vio.global_clock
+
+    FOREACH (_ IN CASE WHEN vio.player_id IS NOT NULL AND vio.player_id <> 0 THEN [1] ELSE [] END |
+        MERGE (pl:Player {id: vio.player_id})
+        MERGE (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
+        MERGE (ps)-[:COMMITTED_VIOLATION]->(v)
+    )
+
+    FOREACH (_ IN CASE 
+        WHEN vio.player_id = 0 OR vio.player_id IS NULL 
+        THEN [1] ELSE [] END |
+        MERGE (ls)-[:COMMITTED_VIOLATION]->(v)
+    )
+"""
+
+
 MERGE_FOULS = """
     MATCH (g:Game {id: $game_id})
     UNWIND $fouls AS foul
