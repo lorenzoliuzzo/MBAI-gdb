@@ -10,7 +10,7 @@ from ..queries.game import \
     MERGE_PERIODS, MERGE_STINTS, \
     MERGE_JUMPBALLS, MERGE_VIOLATIONS, MERGE_FOULS, \
     MERGE_SHOTS, MERGE_FREETHROWS, \
-    MERGE_REBOUNDS, MERGE_TURNOVERS, \
+    MERGE_REBOUNDS, MERGE_TURNOVERS, MERGE_TIMEOUTS, \
     MERGE_SCORES, SET_PLUS_MINUS
 
 
@@ -306,6 +306,11 @@ class GameManager(BaseManager):
         tov_data = actions[tov_mask].apply(process_turnover, axis=1)
         tov_params = {"game_id": self.game_id, "turnovers": tov_data.tolist()}
         self.execute_write(MERGE_TURNOVERS, tov_params)
+
+        timeout_mask = actions["actionType"] == "timeout"
+        timeout_data = actions[timeout_mask].apply(process_action, axis=1)
+        timeout_params = {"game_id": self.game_id, "timeouts": timeout_data.tolist()}
+        self.execute_write(MERGE_TIMEOUTS, timeout_params)
 
         params = {"game_id": self.game_id}
         self.execute_write(MERGE_SCORES, params)

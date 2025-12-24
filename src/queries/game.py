@@ -677,6 +677,36 @@ MERGE_TURNOVERS = """
 """
 
 
+MERGE_TIMEOUTS = """
+    MATCH (g:Game {id: $game_id})
+    UNWIND $timeouts AS to
+
+    WITH g, to,
+        toString(g.id) + "_" + toString(to.period) + "_" + to.clock + "_timeout_" + 
+        toString(to.team_id) AS to_id
+
+    MERGE (t:Action:TimeOut {id: to_id})
+    ON CREATE SET 
+        t.time = datetime(to.time),
+        t.clock = duration(to.clock),
+        t.local_clock = to.local_clock,
+        t.global_clock = to.global_clock
+
+    FOREACH (_ IN CASE WHEN to.subtype = 'full' THEN [1] ELSE [] END | SET t:FullTimeOut)
+    FOREACH (_ IN CASE WHEN to.subtype = 'short' THEN [1] ELSE [] END | SET t:ShortTimeOut)
+
+    WITH g, t, to
+    MATCH (p:Period {n: to.period})-[:IN_GAME]->(g)
+    MATCH (team:Team {id: to.team_id})
+    
+    MATCH (team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
+    WHERE ls.global_clock <= to.global_clock 
+        AND (ls.global_clock + ls.clock_duration) >= to.global_clock
+
+    MERGE (ls)-[:CALLED_TIMEOUT]->(t)
+"""
+
+
 MERGE_SCORES = """
     MATCH (g:Game {id: $game_id})
     MATCH (home:Team)-[:PLAYED_HOME]->(g)
