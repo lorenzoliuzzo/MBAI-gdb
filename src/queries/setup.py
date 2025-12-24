@@ -18,7 +18,6 @@ SETUP_QUERIES = [
 
     "CREATE CONSTRAINT action_id IF NOT EXISTS FOR (a:Action) REQUIRE a.id IS UNIQUE",
     "CREATE CONSTRAINT score_id IF NOT EXISTS FOR (s:Score) REQUIRE s.id IS UNIQUE",
-    "CREATE CONSTRAINT margin_id IF NOT EXISTS FOR (m:ScoreMargin) REQUIRE m.id IS UNIQUE",
 
     "CREATE INDEX ls_timeline IF NOT EXISTS FOR (ls:LineUpStint) ON (ls.global_clock)",
     "CREATE INDEX ps_timeline IF NOT EXISTS FOR (ps:PlayerStint) ON (ps.global_clock)",

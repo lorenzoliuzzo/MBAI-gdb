@@ -8,9 +8,10 @@ from ..fetcher import fetch_boxscore, fetch_pbp
 from ..queries.game import \
     GET_TEAMS, \
     MERGE_PERIODS, MERGE_STINTS, \
+    MERGE_JUMPBALLS, \
     MERGE_SHOTS, MERGE_FREETHROWS, \
-    MERGE_REBOUNDS, MERGE_FOULS, \
-    MERGE_SCORES
+    MERGE_REBOUNDS, MERGE_FOULS, MERGE_TURNOVERS, \
+    MERGE_SCORES, SET_PLUS_MINUS
 
 
 class GameManager(BaseManager):
@@ -215,13 +216,27 @@ class GameManager(BaseManager):
                 "type": row["actionType"],
                 "subtype": row["subType"],
                 "team_id": row["teamId"] if row["teamId"] != -1 else None,
-                "player_id": row["personId"] if row["personId"] != -1 else None,
+                "player_id": row["personId"] if row["personId"] != -1 else None
             }
+
+        def process_jumpball(row) -> Dict[str, Any]:
+            entry = process_action(row)
+            entry.update({
+                "descriptor": row["descriptor"] if row["descriptor"] != -1 else None, 
+                "recovered_id": row["jumpBallRecoverdPersonId"] if row["jumpBallRecoverdPersonId"] != -1 else None,
+                "won_id": row["jumpBallWonPersonId"] if row["jumpBallWonPersonId"] != -1 else None,
+                "lost_id": row["jumpBallLostPersonId"] if row["jumpBallLostPersonId"] != -1 else None
+            })
+            return entry
 
 
         def process_foul(row) -> Dict[str, Any]:
             entry = process_action(row)
-            entry.update({"drawn_id": row["foulDrawnPersonId"] if row["foulDrawnPersonId"] != -1 else None})
+            entry.update({
+                "descriptor": row["descriptor"] if row["descriptor"] != -1 else None, 
+                "drawn_id": row["foulDrawnPersonId"] if row["foulDrawnPersonId"] != -1 else None,
+                "official_id": row["officialId"] if row["officialId"] != -1 else None
+            })
             return entry
                 
         def process_shot(row) -> Dict[str, Any]:
@@ -230,6 +245,7 @@ class GameManager(BaseManager):
                 "result": row["shotResult"],
                 "x": row["x"], "y": row["y"],
                 "distance": row["shotDistance"],
+                "descriptor": row["descriptor"] if row["descriptor"] != -1 else None, 
                 "assist_id": row["assistPersonId"] if row["assistPersonId"] != -1 else None,
                 "block_id": row["blockPersonId"] if row["blockPersonId"] != -1 else None,   
             })
@@ -240,25 +256,46 @@ class GameManager(BaseManager):
             entry.update({"result": row["shotResult"]})
             return entry
 
+        def process_turnover(row) -> Dict[str, Any]:
+            entry = process_action(row)
+            entry.update({
+                "descriptor": row["descriptor"] if row["descriptor"] != -1 else None, 
+                "steal_id": row["stealPersonId"] if row["stealPersonId"] != -1 else None, 
+                "official_id": row["officialId"] if row["officialId"] != -1 else None
+            })
+            return entry
+        
+        
+        jumpball_mask = actions["actionType"] == "jumpball"
+        jumpball_data = actions[jumpball_mask].apply(process_jumpball, axis=1)
+        jumpball_params = {"game_id": self.game_id, "jumpballs": jumpball_data.tolist()}
+        self.execute_write(MERGE_JUMPBALLS, jumpball_params)
 
         foul_mask = actions["actionType"] == "foul"
-        foul_data = actions[foul_mask].apply(process_foul, axis=1).tolist()
-        foul_params = {"game_id": self.game_id, "fouls": foul_data}
+        foul_data = actions[foul_mask].apply(process_foul, axis=1)
+        foul_params = {"game_id": self.game_id, "fouls": foul_data.tolist()}
         self.execute_write(MERGE_FOULS, foul_params)
 
         shot_mask = (actions["actionType"] == "2pt") | (actions["actionType"] == "3pt")
-        shot_data = actions[shot_mask].apply(process_shot, axis=1).tolist()
-        shot_params = {"game_id": self.game_id, "shots": shot_data}
+        shot_data = actions[shot_mask].apply(process_shot, axis=1)
+        shot_params = {"game_id": self.game_id, "shots": shot_data.tolist()}
         self.execute_write(MERGE_SHOTS, shot_params)
 
         ft_mask = actions["actionType"] == "freethrow"
-        ft_data = actions[ft_mask].apply(process_freethrow, axis=1).tolist()
-        ft_params = {"game_id": self.game_id, "shots": ft_data}
+        ft_data = actions[ft_mask].apply(process_freethrow, axis=1)
+        ft_params = {"game_id": self.game_id, "shots": ft_data.tolist()}
         self.execute_write(MERGE_FREETHROWS, ft_params)
 
         reb_mask = actions["actionType"] == "rebound"
-        reb_data = actions[reb_mask].apply(process_action, axis=1).tolist()
-        reb_params = {"game_id": self.game_id, "rebounds": reb_data}
+        reb_data = actions[reb_mask].apply(process_action, axis=1)
+        reb_params = {"game_id": self.game_id, "rebounds": reb_data.tolist()}
         self.execute_write(MERGE_REBOUNDS, reb_params)
 
-        self.execute_write(MERGE_SCORES, {"game_id": self.game_id})
+        tov_mask = actions["actionType"] == "turnover"
+        tov_data = actions[tov_mask].apply(process_turnover, axis=1)
+        tov_params = {"game_id": self.game_id, "turnovers": tov_data.tolist()}
+        self.execute_write(MERGE_TURNOVERS, tov_params)
+
+        params = {"game_id": self.game_id}
+        self.execute_write(MERGE_SCORES, params)
+        self.execute_write(SET_PLUS_MINUS, params)
