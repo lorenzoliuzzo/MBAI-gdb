@@ -85,25 +85,17 @@ MERGE_STINTS = """
             WHERE p.n = lineup.period
 
             WITH i, g, p, l, lineup,
-                l.id + "_" + toString(g.id) + "_" + toString(p.n) + "_" + toString(i) AS stint_id,
-                CASE WHEN lineup.time = "" 
-                    THEN p.start 
-                    ELSE datetime(lineup.time)
-                END AS time,
-                duration(lineup.clock) AS clock
-
+                l.id + "_" + toString(g.id) + "_" + toString(p.n) + "_" + toString(i) AS stint_id
+            
             MERGE (ls:LineUpStint {id: stint_id})
             ON CREATE SET
-                ls._clock = clock,
-                ls.clock = CASE WHEN p.n <= 4 
-                    THEN 720.0 - clock.milliseconds / 1000.0
-                    ELSE 300.0 - clock.milliseconds / 1000.0
-                END,
-                ls.global_clock = CASE WHEN p.n <= 4 
-                    THEN p.n * 720.0 - clock.milliseconds / 1000.0
-                    ELSE 2880.0 + (p.n - 4) * 300.0 - clock.milliseconds / 1000.0
-                END,
-                ls.time = time
+                ls.clock = duration(lineup.clock),
+                ls.local_clock = lineup.local_clock,
+                ls.global_clock = lineup.global_clock,
+                ls.time = CASE WHEN lineup.time = "" 
+                    THEN p.start 
+                    ELSE datetime(lineup.time)
+                END
 
             MERGE (l)-[:ON_COURT]->(ls)
             MERGE (ls)-[:IN_PERIOD]->(p)
@@ -118,30 +110,27 @@ MERGE_STINTS = """
                     THEN stints[j + 1] 
                     ELSE NULL
                 END AS next
-            
+
             SET
                 current.clock_duration = CASE 
                     WHEN next IS NOT NULL 
-                    THEN next.clock - current.clock
+                    THEN next.local_clock - current.local_clock
                     ELSE CASE 
                         WHEN p.n <= 4
-                        THEN 720.0 - current.clock 
-                        ELSE 300.0 - current.clock
+                        THEN 720.0 - current.local_clock 
+                        ELSE 300.0 - current.local_clock
                     END
                 END,
                 current.time_duration = CASE WHEN next IS NOT NULL 
                     THEN duration.between(current.time, next.time)
                     ELSE duration.between(current.time, p.start + p.duration)
                 END
-
+                
             FOREACH (_ IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
                 MERGE (current)-[:ON_COURT_NEXT]->(next)
             )
-        
         }
-
     }
-
 
     WITH distinct g
     CALL (g) {
@@ -226,9 +215,9 @@ MERGE_STINTS = """
         MERGE (ps:PlayerStint {id: ps_id})   
         MERGE (pl)-[:ON_COURT]->(ps)    
         ON CREATE SET 
-            ps.global_clock = first_ls.global_clock,
-            ps._clock = first_ls._clock,
             ps.clock = first_ls.clock,
+            ps.local_clock = first_ls.local_clock,
+            ps.global_clock = first_ls.global_clock,
             ps.time = first_ls.time,
             ps.clock_duration = total_clock_duration,
             ps.time_duration = total_time_duration
@@ -265,32 +254,16 @@ MERGE_FOULS = """
     MATCH (g:Game {id: $game_id})
     UNWIND $fouls AS foul
 
-    WITH g, foul, 
-        duration(foul.clock) AS clock
-    
-    WITH g, foul, clock,
-        CASE WHEN foul.period <= 4 
-            THEN 720.0 - (clock.milliseconds / 1000.0)
-            ELSE 300.0 - (clock.milliseconds / 1000.0)
-        END AS local_clock,
-        CASE WHEN foul.period <= 4 
-            THEN foul.period * 720.0 - (clock.milliseconds / 1000.0)
-            ELSE 2880.0 + (foul.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
-        END AS global_clock
-
-    WITH g, foul, clock, local_clock, global_clock,
-        toString(g.id) + "_" + 
-        toString(foul.period) + "_" + 
-        foul.clock + 
-        "_foul_" + 
+    WITH g, foul,
+        toString(g.id) + "_" + toString(foul.period) + "_" + foul.clock + "_foul_" + 
         COALESCE(toString(NULLIF(foul.player_id, 0)), toString(foul.team_id)) AS foul_id
 
     MERGE (f:Action:Foul {id: foul_id})
     ON CREATE SET 
         f.time = datetime(foul.time),
-        f._clock = clock,
-        f.local_clock = local_clock,
-        f.global_clock = global_clock
+        f._clock = duration(foul.clock),
+        f.local_clock = foul.local_clock,
+        f.global_clock = foul.global_clock
 
     FOREACH (_ IN CASE WHEN foul.subtype = 'offensive' THEN [1] ELSE [] END | 
         SET f:Offensive
@@ -305,13 +278,13 @@ MERGE_FOULS = """
         SET f:Flagrant
     )
 
-    WITH g, f, foul, global_clock
+    WITH g, f, foul
     MATCH (p:Period {n: foul.period})-[:IN_GAME]->(g)
     MATCH (t:Team {id: foul.team_id})
     
     MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
-    WHERE ls.global_clock <= global_clock 
-        AND ls.global_clock + ls.clock_duration >= global_clock
+    WHERE ls.global_clock <= foul.global_clock 
+        AND ls.global_clock + ls.clock_duration >= foul.global_clock
 
     CALL (foul, f, ls) {
         WITH foul, f, ls
@@ -329,18 +302,18 @@ MERGE_FOULS = """
         MERGE (ls)-[:TEAM_COMMITTED_FOUL]->(f)
     }
 
-    WITH g, f, foul, p, global_clock
+    WITH g, f, foul, p
     
-    CALL (g, f, foul, p, global_clock) {
-        WITH g, f, foul, p, global_clock
+    CALL (g, f, foul, p) {
+        WITH g, f, foul, p
         WHERE foul.drawn_id IS NOT NULL AND foul.drawn_id <> 0
         
         MATCH (victim:Player {id: foul.drawn_id})
         MATCH (victim)-[:ON_COURT]->(v_ps:PlayerStint)
         
         MATCH (v_ps)-[:ON_COURT_WITH]->(v_ls:LineUpStint)-[:IN_PERIOD]->(p)
-        WHERE v_ls.global_clock <= global_clock 
-            AND (v_ls.global_clock + v_ls.clock_duration) >= global_clock
+        WHERE v_ls.global_clock <= foul.global_clock 
+            AND (v_ls.global_clock + v_ls.clock_duration) >= foul.global_clock
 
         MERGE (v_ps)-[:DREW_FOUL]->(f)
     }
@@ -350,50 +323,33 @@ MERGE_FOULS = """
 MERGE_SHOTS = """
     MATCH (g:Game {id: $game_id})
     UNWIND $shots as shot
-
-    WITH g, shot, 
-        duration(shot.clock) AS clock
     
-    WITH g, shot, clock,
-        CASE WHEN shot.period <= 4 
-            THEN 720.0 - (clock.milliseconds / 1000.0)
-            ELSE 300.0 - (clock.milliseconds / 1000.0)
-        END AS local_clock,
-        CASE WHEN shot.period <= 4 
-            THEN shot.period * 720.0 - (clock.milliseconds / 1000.0)
-            ELSE 2880.0 + (shot.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
-        END AS global_clock
-
-    WITH g, shot, clock, local_clock, global_clock,
-        toString(g.id) + "_" + \
-        toString(shot.period) + "_" + \
-        shot.clock + \
-        "_shot_" + \
-        toString(shot.player_id) AS shot_id
+    WITH g, shot, 
+        toString(g.id) + "_" + toString(shot.period) + "_" + shot.clock + "_shot_" + toString(shot.player_id) AS shot_id
 
     MERGE (s:Action:Shot {id: shot_id})
     ON CREATE SET 
         s.time = datetime(shot.time),
-        s._clock = clock,
-        s.local_clock = local_clock,
-        s.global_clock = global_clock,
+        s.clock = duration(shot.clock),
+        s.local_clock = shot.local_clock,
+        s.global_clock = shot.global_clock,
         s.x = shot.x, 
         s.y = shot.y,
         s.distance = shot.distance
 
-    WITH g, s, shot, global_clock
+    WITH g, s, shot
     MATCH (p:Period {n: shot.period})-[:IN_GAME]->(g)
     MATCH (t:Team {id: shot.team_id})
     MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
-    WHERE ls.global_clock <= global_clock 
-        AND ls.global_clock + ls.clock_duration >= global_clock
+    WHERE ls.global_clock <= s.global_clock 
+        AND ls.global_clock + ls.clock_duration >= s.global_clock
         
-    WITH g, s, shot, ls, p, t, global_clock
+    WITH g, s, shot, ls, p, t
     MATCH (:Player {id: shot.player_id})-[:ON_COURT]->(ps:PlayerStint)
     WHERE (ps)-[:ON_COURT_WITH]->(ls)    
     MERGE (ps)-[:SHOT]->(s)
 
-    WITH shot, ls, s, p, t, global_clock
+    WITH shot, ls, s, p, t
 
     CALL (shot, ls, s) {
         WITH shot, ls, s 
@@ -403,14 +359,14 @@ MERGE_SHOTS = """
         MERGE (as)-[:ASSISTED]->(s)
     }
 
-    CALL (shot, p, s, global_clock, t) {
-        WITH shot, p, s, global_clock, t 
+    CALL (shot, p, s, t) {
+        WITH shot, p, s, t 
         WHERE shot.block_id IS NOT NULL
         
         MATCH (ot:Team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ols:LineUpStint)-[:IN_PERIOD]->(p)
         WHERE ot <> t 
-            AND ols.global_clock <= global_clock 
-            AND (ols.global_clock + ols.clock_duration) >= global_clock
+            AND ols.global_clock <= s.global_clock 
+            AND (ols.global_clock + ols.clock_duration) >= s.global_clock
         
         MATCH (blocker:Player {id: shot.block_id})
         MATCH (blocker)-[:ON_COURT]->(bs:PlayerStint)-[:ON_COURT_WITH]->(ols)
@@ -436,34 +392,15 @@ MERGE_FREETHROWS = """
     MATCH (g:Game {id: $game_id})
     UNWIND range(0, size($shots)-1) as i
     WITH g, $shots[i] as ft, i
-
     WITH g, ft, i,
-        duration(ft.clock) AS clock
-    
-    WITH g, ft, i, clock,
-        CASE WHEN ft.period <= 4 
-            THEN 720.0 - (clock.milliseconds / 1000.0)
-            ELSE 300.0 - (clock.milliseconds / 1000.0)
-        END AS local_clock,
-        CASE WHEN ft.period <= 4 
-            THEN ft.period * 720.0 - (clock.milliseconds / 1000.0)
-            ELSE 2880.0 + (ft.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
-        END AS global_clock
-
-    WITH g, ft, i, clock, local_clock, global_clock,
-        toString(g.id) + "_" + 
-        toString(ft.period) + "_" + 
-        ft.clock + 
-        "_ft_" + 
-        toString(ft.player_id) + "_" + 
-        toString(i) AS ft_id
+        toString(g.id) + "_" + toString(ft.period) + "_" + ft.clock + "_ft_" + toString(ft.player_id) + "_" + toString(i) AS ft_id
 
     MERGE (s:Action:Shot:FreeThrow {id: ft_id})
     ON CREATE SET 
         s.time = datetime(ft.time),
-        s._clock = clock,
-        s.local_clock = local_clock,
-        s.global_clock = global_clock
+        s.clock = duration(ft.clock),
+        s.local_clock = ft.local_clock,
+        s.global_clock = ft.global_clock
 
     FOREACH (_ IN CASE WHEN ft.result = 'Made' THEN [1] ELSE [] END | 
         SET s:Made
@@ -472,23 +409,23 @@ MERGE_FREETHROWS = """
         SET s:Missed
     )
 
-    WITH g, s, ft, global_clock
+    WITH g, s, ft
     MATCH (p:Period {n: ft.period})-[:IN_GAME]->(g)
     MATCH (t:Team {id: ft.team_id})
     MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
-    WHERE ls.global_clock <= global_clock 
-        AND ls.global_clock + ls.clock_duration >= global_clock
+    WHERE ls.global_clock <= s.global_clock 
+        AND ls.global_clock + ls.clock_duration >= s.global_clock
         
-    WITH g, s, ft, ls, p, t, global_clock
+    WITH g, s, ft, ls, p, t
     MATCH (:Player {id: ft.player_id})-[:ON_COURT]->(ps:PlayerStint)
     WHERE (ps)-[:ON_COURT_WITH]->(ls)    
     MERGE (ps)-[:SHOT]->(s)
 
-    WITH g, s, global_clock
+    WITH g, s
     
     MATCH (f:Action:Foul)
     WHERE f.id STARTS WITH toString(g.id) 
-        AND f.global_clock = global_clock
+        AND f.global_clock = s.global_clock
     
     MERGE (f)-[:CAUSED]->(s)
 """
@@ -498,32 +435,16 @@ MERGE_REBOUNDS = """
     MATCH (g:Game {id: $game_id})
     UNWIND $rebounds AS reb
 
-    WITH g, reb, 
-        duration(reb.clock) AS clock
-    
-    WITH g, reb, clock,
-        CASE WHEN reb.period <= 4 
-            THEN 720.0 - (clock.milliseconds / 1000.0)
-            ELSE 300.0 - (clock.milliseconds / 1000.0)
-        END AS local_clock,
-        CASE WHEN reb.period <= 4 
-            THEN reb.period * 720.0 - (clock.milliseconds / 1000.0)
-            ELSE 2880.0 + (reb.period - 4) * 300.0 - (clock.milliseconds / 1000.0)
-        END AS global_clock
-
-    WITH g, reb, clock, local_clock, global_clock,
-        toString(g.id) + "_" + 
-        toString(reb.period) + "_" + 
-        reb.clock + 
-        "_reb_" + 
+    WITH g, reb,
+        toString(g.id) + "_" + toString(reb.period) + "_" + reb.clock + "_reb_" + 
         COALESCE(toString(NULLIF(reb.player_id, 0)), toString(reb.team_id)) AS reb_id
 
     MERGE (r:Action:Rebound {id: reb_id})
     ON CREATE SET 
         r.time = datetime(reb.time),
-        r._clock = clock,
-        r.local_clock = local_clock,
-        r.global_clock = global_clock
+        r.clock = duration(reb.clock),
+        r.local_clock = reb.local_clock,
+        r.global_clock = reb.global_clock
 
     FOREACH (_ IN CASE WHEN reb.subtype = 'offensive' THEN [1] ELSE [] END | 
         SET r:Offensive
@@ -532,13 +453,13 @@ MERGE_REBOUNDS = """
         SET r:Defensive
     )
 
-    WITH g, r, reb, global_clock
+    WITH g, r, reb
     MATCH (p:Period {n: reb.period})-[:IN_GAME]->(g)
     MATCH (t:Team {id: reb.team_id})
     
     MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(p)
-    WHERE ls.global_clock <= global_clock 
-        AND ls.global_clock + ls.clock_duration >= global_clock
+    WHERE ls.global_clock <= r.global_clock 
+        AND ls.global_clock + ls.clock_duration >= r.global_clock
         
     CALL (reb, r, ls) {
         WITH reb, r, ls
@@ -553,14 +474,14 @@ MERGE_REBOUNDS = """
         MERGE (ls)-[:REBOUNDED]->(r)
     }
 
-    WITH g, r, global_clock
-    CALL (g, r, global_clock) {
-        WITH g, r, global_clock
+    WITH g, r
+    CALL (g, r) {
+        WITH g, r
         
         MATCH (s:Shot:Missed)
         WHERE s.id STARTS WITH toString(g.id) 
-            AND s.global_clock <= global_clock
-            AND s.global_clock >= global_clock - 15.0
+            AND s.global_clock <= r.global_clock
+            AND s.global_clock >= r.global_clock - 10.0
             AND NOT EXISTS {
                 MATCH (other:Rebound)-[:REBOUND_OF]->(s)
                 WHERE other.id <> r.id

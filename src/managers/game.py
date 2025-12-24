@@ -143,6 +143,8 @@ class GameManager(BaseManager):
             team_lineups = []
             current_lineup = set(team_starters)
             for p, period_df in team_subs.groupby('period', sort=False):
+                period_len = 300.0 if p > 4 else 720.0                
+                global_offset = 2880.0 + (p - 5) * 300.0 if p > 4 else (p - 1) * 720.0    
                 start_clock = "PT05M00.00S" if p > 4 else "PT12M00.00S"
                 start_mask = (period_df['clock'] == start_clock)    
 
@@ -154,13 +156,18 @@ class GameManager(BaseManager):
                         current_lineup.discard(player)
                         
                 starters_entry = {
-                    "period": p, "time": "", "clock": start_clock,
+                    "period": p, 
+                    "time": "", 
+                    "clock": start_clock,
+                    "local_clock": 0.0,
+                    "global_clock": global_offset, 
                     "ids": sorted(list(current_lineup))
                 }
                 team_lineups.append(starters_entry)
 
                 for clock, group in period_df[~start_mask].groupby("clock", sort=False):
-                    time = group['timeActual'].iloc[0]
+                    period_elapsed = period_len - pd.Timedelta(clock).total_seconds()   
+
                     for _, row in group.iterrows():
                         player = row["personId"]    
                         if row["subType"] == "in":
@@ -171,7 +178,11 @@ class GameManager(BaseManager):
                     if len(current_lineup) == 5:
                         if current_lineup != set(team_lineups[-1]["ids"]):
                             lineup_entry = {
-                                "period": p, "clock": clock, "time": time,
+                                "period": p, 
+                                "time": group['timeActual'].iloc[0],
+                                "clock": clock,
+                                "local_clock": period_elapsed,
+                                "global_clock": global_offset + period_elapsed, 
                                 "ids": sorted(list(current_lineup))
                             }
                             team_lineups.append(lineup_entry)
@@ -187,15 +198,26 @@ class GameManager(BaseManager):
     def load_actions(self, actions: pd.DataFrame) -> None:
 
         def process_action(row) -> Dict[str, Any]:
+            remaining = pd.Timedelta(row["clock"]).total_seconds()         
+            if row["period"] <= 4:
+                period_elapsed = 720.0 - remaining
+                global_offset = (row["period"] - 1) * 720.0
+            else:
+                period_elapsed = 300.0 - remaining
+                global_offset = 2880.0 + (row["period"] - 5) * 300.0
+            
             return {
                 "time": row["timeActual"],
                 "period": row["period"],
                 "clock": row["clock"],
+                "local_clock": round(period_elapsed, 2),
+                "global_clock": round(global_offset + period_elapsed, 2),
                 "type": row["actionType"],
                 "subtype": row["subType"],
                 "team_id": row["teamId"] if row["teamId"] != -1 else None,
                 "player_id": row["personId"] if row["personId"] != -1 else None,
             }
+
 
         def process_foul(row) -> Dict[str, Any]:
             entry = process_action(row)
