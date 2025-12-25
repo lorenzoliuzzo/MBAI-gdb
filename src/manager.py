@@ -50,4 +50,4 @@ class BaseManager:
             result = session.execute_read(
                 lambda tx: tx.run(query, **params).data()
             )
-            return result if len(result) > 1 else result[0]
+            return result

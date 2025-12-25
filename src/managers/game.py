@@ -14,6 +14,9 @@ from ..queries.game import \
     MERGE_SCORES, SET_PLUS_MINUS
 
 
+import torch
+from torch_geometric.data import HeteroData
+
 class GameManager(BaseManager):
 
     def __init__(self, game_id: int):
@@ -22,7 +25,7 @@ class GameManager(BaseManager):
 
         try: 
             params = {"game_id": game_id}
-            result = self.execute_read(GET_TEAMS, params)
+            result = self.execute_read(GET_TEAMS, params)[0]
 
             if not result:
                 raise ValueError(f"Game {game_id} not found in database!")
@@ -315,3 +318,115 @@ class GameManager(BaseManager):
         params = {"game_id": self.game_id}
         self.execute_write(MERGE_SCORES, params)
         self.execute_write(SET_PLUS_MINUS, params)
+
+
+    
+    def to_pyg(self) -> HeteroData:
+        data = HeteroData()
+
+        data['game'].x = torch.tensor([[1.0]], dtype=torch.float)
+        data['team'].x = torch.eye(2)
+
+        data['team', 'played_home', 'game'].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
+        data['team', 'played_away', 'game'].edge_index = torch.tensor([[1], [0]], dtype=torch.long)
+
+        l_uids = []; p_ids = []; ls_uids = []; ps_uids = []
+        l_seen = set(); p_seen = set(); ls_seen = set(); ps_seen = set()
+        
+        t_l_edges = set(); p_l_edges = set(); 
+        l_ls_edges = set(); p_ps_edges = set()
+        ps_ls_edges = set()
+
+        ls_clocks = {}; ps_clocks = {}; ls_durations = {}; ps_durations = {}
+
+        query = """
+            MATCH (g:Game {id: $game_id})
+            MATCH (t:Team)-[:HAS_LINEUP]->(l:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g)
+            MATCH (l)<-[:MEMBER_OF]-(p:Player)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
+            RETURN 
+                t.id AS t_id, 
+                elementId(l) AS l_id,
+                p.id AS p_id,
+                elementId(ls) AS ls_id, ls.global_clock AS ls_clock, ls.clock_duration AS ls_duration,
+                elementId(ps) AS ps_id, ps.global_clock AS ps_clock, ps.clock_duration AS ps_duration
+            ORDER BY ps_clock ASC
+        """
+        results = self.execute_read(query, {"game_id": self.game_id})
+        for row in results:
+            if row['l_id'] not in l_seen:
+                l_uids.append(row['l_id'])
+                l_seen.add(row['l_id'])
+        
+            if row['p_id'] not in p_seen:
+                p_ids.append(row['p_id'])
+                p_seen.add(row['p_id'])
+
+            if row['ls_id'] not in ls_seen:
+                ls_uids.append(row['ls_id'])
+                ls_seen.add(row['ls_id'])
+                ls_clocks[row['ls_id']] = row['ls_clock'] 
+                ls_durations[row['ls_id']] = row['ls_duration'] 
+
+            if row['ps_id'] not in ps_seen:
+                ps_uids.append(row['ps_id'])
+                ps_seen.add(row['ps_id'])
+                ps_clocks[row['ps_id']] = row['ps_clock'] 
+                ps_durations[row['ps_id']] = row['ps_duration'] 
+
+        g_map = {self.game_id: 0}
+        t_map = {self.team_ids[0]: 0, self.team_ids[1]: 1}
+        l_map = {uid: i for i, uid in enumerate(l_uids)}        
+        p_map = {id: i for i, id in enumerate(p_ids)}
+        ls_map = {uid: i for i, uid in enumerate(ls_uids)}        
+        ps_map = {uid: i for i, uid in enumerate(ps_uids)}        
+
+        data['lineup'].x = torch.ones((len(l_uids), 1), dtype=torch.float)        
+        data['player'].x = torch.ones((len(p_ids), 1), dtype=torch.float)
+        
+        data['lineup_stint'].x = torch.tensor(
+            [[ls_clocks[uid], ls_durations[uid]] for uid in ls_uids], 
+            dtype=torch.float
+        )
+        
+        data['player_stint'].x = torch.tensor(
+            [[ps_clocks[uid], ps_durations[uid]] for uid in ps_uids], 
+            dtype=torch.float
+        )
+        
+        for row in results:
+            # TEAM - HAS_LINEUP - LINEUP
+            if row['t_id'] in t_map and row['l_id'] in l_map:
+                t_l_edges.add((t_map[row['t_id']], l_map[row['l_id']]))
+
+            # PLAYER - MEMBER_OF - LINEUP
+            if row['p_id'] in p_map and row['l_id'] in l_map:
+                p_l_edges.add((p_map[row['p_id']], l_map[row['l_id']]))
+    
+            # LINEUP - ON_COURT - LINEUPSTINT
+            if row['l_id'] in l_map and row['ls_id'] in ls_map:
+                l_ls_edges.add((l_map[row['l_id']], ls_map[row['ls_id']]))
+
+            # PLAYER - ON_COURT - PLAYERSTINT
+            if row['p_id'] in p_map and row['ps_id'] in ps_map:
+                p_ps_edges.add((p_map[row['p_id']], ps_map[row['ps_id']]))
+
+            # PLAYERSTINT - ON_COURT_WITH - LINEUPSTINT
+            if row['ps_id'] in ps_map and row['ls_id'] in ls_map:
+                ps_ls_edges.add((ps_map[row['ps_id']], ls_map[row['ls_id']]))
+
+        t_l_edges_tensor = torch.tensor(list(t_l_edges), dtype=torch.long).t().contiguous()
+        data['team', 'has_lineup', 'lineup'].edge_index = t_l_edges_tensor
+
+        p_l_edges_tensor = torch.tensor(list(p_l_edges), dtype=torch.long).t().contiguous()
+        data['player', 'member_of', 'lineup'].edge_index = p_l_edges_tensor
+        
+        l_ls_edges_tensor = torch.tensor(list(l_ls_edges), dtype=torch.long).t().contiguous()            
+        data['lineup', 'on_court', 'lineup_stint'].edge_index = l_ls_edges_tensor
+        
+        p_ps_edges_tensor = torch.tensor(list(p_ps_edges), dtype=torch.long).t().contiguous()
+        data['player', 'on_court', 'player_stint'].edge_index = p_ps_edges_tensor
+        
+        ps_ls_edges_tensor = torch.tensor(list(ps_ls_edges), dtype=torch.long).t().contiguous()
+        data['player_stint', 'on_court_with', 'player_stint'].edge_index = ps_ls_edges_tensor
+
+        return data
