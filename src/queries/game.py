@@ -85,7 +85,7 @@ MERGE_STINTS = """
             WHERE p.n = lineup.period
 
             WITH i, g, p, l, lineup,
-                l.id + "_" + toString(g.id) + "_" + toString(p.n) + "_" + toString(i) AS stint_id
+                toString(g.id) + "_" + toString(p.n) + "_" + l.id + "_" + toString(i) AS stint_id
             
             MERGE (ls:LineUpStint {id: stint_id})
             ON CREATE SET
@@ -207,7 +207,7 @@ MERGE_STINTS = """
             last(sub_stints) AS last_ls
 
         WITH g, p, t, pl, sub_stints, first_ls, last_ls,
-            toString(pl.id) + "_"  + toString(g.id) + "_" + toString(p.n) + "_" + toString(first_ls.global_clock) AS ps_id,
+            toString(g.id) + "_" + toString(p.n) + "_" + toString(pl.id) + "_" + toString(first_ls.global_clock) AS ps_id,
             reduce(d = 0.0, x IN sub_stints | d + x.clock_duration) AS total_clock_duration,
             duration.between(first_ls.time, last_ls.time + last_ls.time_duration) AS total_time_duration
 
@@ -682,8 +682,7 @@ MERGE_TIMEOUTS = """
     UNWIND $timeouts AS to
 
     WITH g, to,
-        toString(g.id) + "_" + toString(to.period) + "_" + to.clock + "_timeout_" + 
-        toString(to.team_id) AS to_id
+        toString(g.id) + "_" + toString(to.period) + "_" + to.clock + "_timeout_" + toString(to.team_id) AS to_id
 
     MERGE (t:Action:TimeOut {id: to_id})
     ON CREATE SET 
