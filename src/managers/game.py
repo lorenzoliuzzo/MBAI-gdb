@@ -5,6 +5,7 @@ from neo4j.exceptions import ServiceUnavailable, CypherSyntaxError, CypherTypeEr
 from ..manager import BaseManager
 
 from ..fetcher import fetch_boxscore, fetch_pbp
+
 from ..queries.game import \
     GET_TEAMS, \
     MERGE_PERIODS, MERGE_STINTS, \
@@ -13,9 +14,9 @@ from ..queries.game import \
     MERGE_REBOUNDS, MERGE_TURNOVERS, MERGE_TIMEOUTS, \
     MERGE_SCORES, SET_PLUS_MINUS
 
-
 import torch
 from torch_geometric.data import HeteroData
+
 
 class GameManager(BaseManager):
 
@@ -159,15 +160,16 @@ class GameManager(BaseManager):
                     else:
                         current_lineup.discard(player)
                         
-                starters_entry = {
-                    "period": p, 
-                    "time": "", 
-                    "clock": start_clock,
-                    "local_clock": 0.0,
-                    "global_clock": global_offset, 
-                    "ids": sorted(list(current_lineup))
-                }
-                team_lineups.append(starters_entry)
+                if len(current_lineup) == 5:
+                    starters_entry = {
+                        "period": p, 
+                        "time": "", 
+                        "clock": start_clock,
+                        "local_clock": 0.0,
+                        "global_clock": global_offset, 
+                        "ids": sorted(list(current_lineup))
+                    }
+                    team_lineups.append(starters_entry)
 
                 for clock, group in period_df[~start_mask].groupby("clock", sort=False):
                     period_elapsed = period_len - pd.Timedelta(clock).total_seconds()   
@@ -234,9 +236,7 @@ class GameManager(BaseManager):
 
         def process_violation(row) -> Dict[str, Any]:
             entry = process_action(row)
-            entry.update({
-                "official_id": row["officialId"] if row["officialId"] != -1 else None
-            })
+            entry.update({"official_id": row["officialId"] if row["officialId"] != -1 else None})
             return entry
                 
         def process_foul(row) -> Dict[str, Any]:
@@ -317,7 +317,7 @@ class GameManager(BaseManager):
 
         params = {"game_id": self.game_id}
         self.execute_write(MERGE_SCORES, params)
-        self.execute_write(SET_PLUS_MINUS, params)
+        # self.execute_write(SET_PLUS_MINUS, params)
 
 
     
@@ -330,89 +330,110 @@ class GameManager(BaseManager):
         data['team', 'played_home', 'game'].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
         data['team', 'played_away', 'game'].edge_index = torch.tensor([[1], [0]], dtype=torch.long)
 
-        l_uids = []; p_ids = []; ls_uids = []; ps_uids = []
-        l_seen = set(); p_seen = set(); ls_seen = set(); ps_seen = set()
+        q_uids = []; l_uids = []; p_ids = []; ls_uids = []; ps_uids = []
+        q_seen = set(); l_seen = set(); p_seen = set(); ls_seen = set(); ps_seen = set()
         
-        t_l_edges = set(); p_l_edges = set(); 
-        l_ls_edges = set(); p_ps_edges = set()
+        q_g_edges = set(); 
+        t_l_edges = set(); p_l_edges = set()
+        l_ls_edges = set(); ls_q_edges = set()
+        p_ps_edges = set(); ps_q_edges = set()
         ps_ls_edges = set()
 
-        ls_clocks = {}; ps_clocks = {}; ls_durations = {}; ps_durations = {}
+        q_ns = {}
+        ls_feats = {}
+        ps_feats = {}
 
         query = """
-            MATCH (g:Game {id: $game_id})
-            MATCH (t:Team)-[:HAS_LINEUP]->(l:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g)
+            MATCH (g:Game {id: $game_id})<-[:IN_GAME]-(q:Period)
+            MATCH (t:Team)-[:HAS_LINEUP]->(l:LineUp)-[:ON_COURT]->(ls:LineUpStint)-[:IN_PERIOD]->(q)
             MATCH (l)<-[:MEMBER_OF]-(p:Player)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
             RETURN 
+                elementId(q) AS q_id, q.n AS q_n,
                 t.id AS t_id, 
                 elementId(l) AS l_id,
                 p.id AS p_id,
-                elementId(ls) AS ls_id, ls.global_clock AS ls_clock, ls.clock_duration AS ls_duration,
-                elementId(ps) AS ps_id, ps.global_clock AS ps_clock, ps.clock_duration AS ps_duration
-            ORDER BY ps_clock ASC
+                elementId(ls) AS ls_id, ls.global_clock AS ls_global_clock, ls.local_clock AS ls_local_clock, ls.clock_duration AS ls_duration,
+                elementId(ps) AS ps_id, ps.global_clock AS ps_global_clock, ps.local_clock AS ps_local_clock, ps.clock_duration AS ps_duration
+            ORDER BY ps_global_clock ASC
         """
         results = self.execute_read(query, {"game_id": self.game_id})
         for row in results:
-            if row['l_id'] not in l_seen:
-                l_uids.append(row['l_id'])
-                l_seen.add(row['l_id'])
+            q = row['q_id']
+            t = row['t_id']
+            l = row['l_id']
+            p = row['p_id']
+            ls = row['ls_id']
+            ps = row['ps_id']
+
+            if q not in q_seen:
+                q_uids.append(q)
+                q_seen.add(q)
+                q_ns[q] = row['q_n'] 
+
+            if l not in l_seen:
+                l_uids.append(l)
+                l_seen.add(l)
         
-            if row['p_id'] not in p_seen:
-                p_ids.append(row['p_id'])
-                p_seen.add(row['p_id'])
+            if p not in p_seen:
+                p_ids.append(p)
+                p_seen.add(p)
 
-            if row['ls_id'] not in ls_seen:
-                ls_uids.append(row['ls_id'])
-                ls_seen.add(row['ls_id'])
-                ls_clocks[row['ls_id']] = row['ls_clock'] 
-                ls_durations[row['ls_id']] = row['ls_duration'] 
+            if ls not in ls_seen:
+                ls_uids.append(ls)
+                ls_seen.add(ls)
+                ls_feats[ls] = [row['ls_global_clock'], row['ls_local_clock'], row['ls_duration']]
 
-            if row['ps_id'] not in ps_seen:
-                ps_uids.append(row['ps_id'])
-                ps_seen.add(row['ps_id'])
-                ps_clocks[row['ps_id']] = row['ps_clock'] 
-                ps_durations[row['ps_id']] = row['ps_duration'] 
+            if ps not in ps_seen:
+                ps_uids.append(ps)
+                ps_seen.add(ps)
+                ps_feats[ps] = [row['ps_global_clock'], row['ps_local_clock'], row['ps_duration']]
 
         g_map = {self.game_id: 0}
         t_map = {self.team_ids[0]: 0, self.team_ids[1]: 1}
+        q_map = {uid: i for i, uid in enumerate(q_uids)}
         l_map = {uid: i for i, uid in enumerate(l_uids)}        
         p_map = {id: i for i, id in enumerate(p_ids)}
         ls_map = {uid: i for i, uid in enumerate(ls_uids)}        
         ps_map = {uid: i for i, uid in enumerate(ps_uids)}        
 
+        data['period'].x = torch.tensor(
+            [[q_ns[uid]] for uid in q_uids], 
+            dtype=torch.float
+        )
+
         data['lineup'].x = torch.ones((len(l_uids), 1), dtype=torch.float)        
         data['player'].x = torch.ones((len(p_ids), 1), dtype=torch.float)
         
         data['lineup_stint'].x = torch.tensor(
-            [[ls_clocks[uid], ls_durations[uid]] for uid in ls_uids], 
+            [ls_feats[uid] for uid in ls_uids], 
             dtype=torch.float
         )
         
         data['player_stint'].x = torch.tensor(
-            [[ps_clocks[uid], ps_durations[uid]] for uid in ps_uids], 
+            [ps_feats[uid] for uid in ps_uids], 
             dtype=torch.float
         )
         
         for row in results:
-            # TEAM - HAS_LINEUP - LINEUP
-            if row['t_id'] in t_map and row['l_id'] in l_map:
-                t_l_edges.add((t_map[row['t_id']], l_map[row['l_id']]))
+            q = row['q_id']
+            t = row['t_id']
+            l = row['l_id']
+            p = row['p_id']
+            ls = row['ls_id']
+            ps = row['ps_id']
 
-            # PLAYER - MEMBER_OF - LINEUP
-            if row['p_id'] in p_map and row['l_id'] in l_map:
-                p_l_edges.add((p_map[row['p_id']], l_map[row['l_id']]))
-    
-            # LINEUP - ON_COURT - LINEUPSTINT
-            if row['l_id'] in l_map and row['ls_id'] in ls_map:
-                l_ls_edges.add((l_map[row['l_id']], ls_map[row['ls_id']]))
+            q_g_edges.add((q_map[q], 0))
+            t_l_edges.add((t_map[t], l_map[l]))
+            p_l_edges.add((p_map[p], l_map[l]))   
+            l_ls_edges.add((l_map[l], ls_map[ls]))
+            p_ps_edges.add((p_map[p], ps_map[ps]))
+            ps_ls_edges.add((ps_map[ps], ls_map[ls]))
+            ls_q_edges.add((ls_map[ls], q_map[q]))
+            ps_q_edges.add((ps_map[ps], q_map[q]))
 
-            # PLAYER - ON_COURT - PLAYERSTINT
-            if row['p_id'] in p_map and row['ps_id'] in ps_map:
-                p_ps_edges.add((p_map[row['p_id']], ps_map[row['ps_id']]))
 
-            # PLAYERSTINT - ON_COURT_WITH - LINEUPSTINT
-            if row['ps_id'] in ps_map and row['ls_id'] in ls_map:
-                ps_ls_edges.add((ps_map[row['ps_id']], ls_map[row['ls_id']]))
+        q_g_edges_tensor = torch.tensor(list(q_g_edges), dtype=torch.long).t().contiguous()
+        data['period', 'in_game', 'game'].edge_index = q_g_edges_tensor
 
         t_l_edges_tensor = torch.tensor(list(t_l_edges), dtype=torch.long).t().contiguous()
         data['team', 'has_lineup', 'lineup'].edge_index = t_l_edges_tensor
@@ -422,11 +443,214 @@ class GameManager(BaseManager):
         
         l_ls_edges_tensor = torch.tensor(list(l_ls_edges), dtype=torch.long).t().contiguous()            
         data['lineup', 'on_court', 'lineup_stint'].edge_index = l_ls_edges_tensor
-        
+
         p_ps_edges_tensor = torch.tensor(list(p_ps_edges), dtype=torch.long).t().contiguous()
         data['player', 'on_court', 'player_stint'].edge_index = p_ps_edges_tensor
         
         ps_ls_edges_tensor = torch.tensor(list(ps_ls_edges), dtype=torch.long).t().contiguous()
-        data['player_stint', 'on_court_with', 'player_stint'].edge_index = ps_ls_edges_tensor
+        data['player_stint', 'on_court_with', 'lineup_stint'].edge_index = ps_ls_edges_tensor
+
+        ls_q_edges_tensor = torch.tensor(list(ls_q_edges), dtype=torch.long).t().contiguous()            
+        data['lineup_stint', 'in_period', 'period'].edge_index = ls_q_edges_tensor
+
+        ps_q_edges_tensor = torch.tensor(list(ps_q_edges), dtype=torch.long).t().contiguous()            
+        data['player_stint', 'in_period', 'period'].edge_index = ps_q_edges_tensor
+
+
+        ls_next_edges = []
+        ps_next_edges = []
+
+        query = """
+            MATCH (g:Game {id: $game_id})
+            
+            MATCH (ls:LineUpStint)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g)
+            MATCH (ls)-[:NEXT]->(next_ls)
+            RETURN 
+                elementId(ls) as curr_id, 
+                elementId(next_ls) as next_id, 
+                'LineUpStint' as type
+            
+            UNION ALL
+
+            MATCH (ps:PlayerStint)-[:ON_COURT_WITH]->(:LineUpStint)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g)
+            MATCH (ps)-[:NEXT]->(next_ps)
+            RETURN 
+                elementId(ps) as curr_id, 
+                elementId(next_ps) as next_id, 
+                'PlayerStint' as type
+        """
+        results = self.execute_read(query, {"game_id": self.game_id})
+        for row in results:           
+            if row['type'] == 'LineUpStint':
+                if row['curr_id'] in ls_map and row['next_id'] in ls_map:
+                    ls_next_edges.append([ls_map[row['curr_id'] ], ls_map[row['next_id']]])
+            
+            elif row['type'] == 'PlayerStint':
+                if row['curr_id'] in ps_map and row['next_id'] in ps_map:
+                    ps_next_edges.append([ps_map[row['curr_id'] ], ps_map[row['next_id']]])
+
+        ls_next_tensor = torch.tensor(ls_next_edges, dtype=torch.long).t().contiguous()
+        ps_next_tensor = torch.tensor(ps_next_edges, dtype=torch.long).t().contiguous()
+        data['lineup_stint', 'next', 'lineup_stint'].edge_index = ls_next_tensor
+        data['player_stint', 'next', 'player_stint'].edge_index = ps_next_tensor
+
+
+        ocn_edges = []
+        query = """
+            MATCH (g:Game {id: $game_id})
+            MATCH (ls1:LineUpStint)-[r:ON_COURT_NEXT]->(ls2:LineUpStint)
+            WHERE (ls1)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g)
+            RETURN elementId(ls1) as curr_id, elementId(ls2) as nxt_id
+        """
+        results = self.execute_read(query, {"game_id": self.game_id})
+        for row in results:           
+            if row['curr_id'] in ls_map and row['nxt_id'] in ls_map:
+                ocn_edges.append([ls_map[row['curr_id']], ls_map[row['nxt_id']]])
+
+        ocn_tensor = torch.tensor(ocn_edges, dtype=torch.long).t().contiguous()
+        data['lineup_stint', 'on_court_next', 'lineup_stint'].edge_index = ocn_tensor
+
+
+        foul_uids = []        
+        foul_feats = []
+        edge_foul = []      
+        edge_foul_drawn = []    
+
+        query = """
+            MATCH (g:Game {id: $game_id})
+            MATCH (ps:PlayerStint)-[:COMMITTED_FOUL]->(f:Foul)
+            WHERE f.id STARTS WITH toString($game_id) 
+            
+            OPTIONAL MATCH (ps_v:PlayerStint)-[:DREW_FOUL]->(f)
+            
+            RETURN 
+                elementId(f) AS foul_id,
+                elementId(ps) AS player_id,
+                elementId(ps_v) AS victim_id,
+                labels(f) AS types,
+                f.local_clock AS local_clock,
+                f.global_clock AS global_clock
+            ORDER BY global_clock ASC
+        """
+        results = self.execute_read(query, {"game_id": self.game_id})
+        for i, row in enumerate(results): 
+            foul_uids.append(row['foul_id'])
+            foul_feats.append([
+                row['global_clock'], row['local_clock'],   
+            ])
+
+            if row['player_id'] in ps_map:
+                edge_foul.append([ps_map[row['player_id']], i])
+            
+            if row['victim_id'] and row['victim_id'] in ps_map:
+                edge_foul_drawn.append([ps_map[row['victim_id']], i])
+
+        foul_map = {uid: i for i, uid in enumerate(foul_uids)}        
+
+        data['foul'].x = torch.tensor(foul_feats, dtype=torch.float)
+        data['player_stint', 'committed_foul', 'foul'].edge_index = torch.tensor(edge_foul, dtype=torch.long).t().contiguous()
+        data['player_stint', 'drew_foul', 'foul'].edge_index = torch.tensor(edge_foul_drawn, dtype=torch.long).t().contiguous() 
+
+
+        shot_uids = []        
+        shot_feats = []
+        edge_shot = []      
+        edge_assist = []    
+        edge_block = []     
+
+        query = """
+            MATCH (g:Game {id: $game_id})
+            MATCH (ps:PlayerStint)-[:TOOK_SHOT]->(s:Shot)
+            WHERE s.id STARTS WITH toString($game_id) 
+                AND NOT s:FreeThrow
+            
+            OPTIONAL MATCH (as:PlayerStint)-[:ASSISTED]->(s)
+            OPTIONAL MATCH (bs:PlayerStint)-[:BLOCKED]->(s)
+            OPTIONAL MATCH (s)-[:GENERATED_SCORE]->(sc:Score)
+
+            RETURN 
+                elementId(s) AS shot_id,
+                elementId(ps) AS shooter_id,
+                elementId(as) AS assist_id,
+                elementId(bs) AS block_id,
+                labels(s) AS labels,
+                s.x AS x, 
+                s.y AS y, 
+                s.distance AS dist,
+                s.local_clock AS local_clock,
+                s.global_clock AS global_clock
+            ORDER BY global_clock ASC
+        """
+        results = self.execute_read(query, {"game_id": self.game_id})
+        for i, row in enumerate(results): 
+            shot_uids.append(row['shot_id'])
+                        
+            is_made = 1.0 if 'Made' in row['labels'] else 0.0
+            is_3pt = 1.0 if '3PT' in row['labels'] else 0.0
+            is_2pt = 1.0 if '2PT' in row['labels'] else 0.0
+            
+            shot_feats.append([
+                row['global_clock'], row['local_clock'],   
+                row['x'], row['y'], row['dist'],    
+                is_2pt, is_3pt, is_made
+            ])
+
+            if row['shooter_id'] in ps_map:
+                edge_shot.append([ps_map[row['shooter_id']], i])
+            
+            if row['assist_id'] and row['assist_id'] in ps_map:
+                edge_assist.append([ps_map[row['assist_id']], i])
+                
+            if row['block_id'] and row['block_id'] in ps_map:
+                edge_block.append([ps_map[row['block_id']], i])
+
+        shot_map = {uid: i for i, uid in enumerate(shot_uids)}        
+
+        data['shot'].x = torch.tensor(shot_feats, dtype=torch.float)
+        data['player_stint', 'took_shot', 'shot'].edge_index = torch.tensor(edge_shot, dtype=torch.long).t().contiguous()
+        data['player_stint', 'assisted', 'shot'].edge_index = torch.tensor(edge_assist, dtype=torch.long).t().contiguous() 
+        data['player_stint', 'blocked', 'shot'].edge_index = torch.tensor(edge_block, dtype=torch.long).t().contiguous() 
+
+
+        ft_uids = []        
+        ft_feats = []
+        edge_ft = []    
+        edge_foul_ft = []    
+
+        query = """
+            MATCH (g:Game {id: $game_id})
+            MATCH (ps:PlayerStint)-[:TOOK_SHOT]->(ft:FreeThrow)
+            WHERE ft.id STARTS WITH toString($game_id) 
+            
+            OPTIONAL MATCH (f:Foul)-[:CAUSED]->(ft)
+            OPTIONAL MATCH (ft)-[:GENERATED_SCORE]->(sc:Score)
+
+            RETURN 
+                elementId(ft) AS ft_id,
+                elementId(ps) AS shooter_id,
+                labels(ft) AS labels,
+                ft.local_clock AS local_clock,
+                ft.global_clock AS global_clock,
+                elementId(f) AS foul_id
+            ORDER BY global_clock ASC
+        """
+        results = self.execute_read(query, {"game_id": self.game_id})
+        for i, row in enumerate(results): 
+            ft_uids.append(row['ft_id'])
+            is_made = 1.0 if 'Made' in row['labels'] else 0.0            
+            ft_feats.append([row['global_clock'], row['local_clock'], is_made])
+
+            if row['shooter_id'] in ps_map:
+                edge_ft.append([ps_map[row['shooter_id']], i])
+
+            if row['foul_id'] and row['foul_id'] in foul_uids:
+                edge_foul_ft.append([foul_map[row['foul_id']], i])
+
+        ft_map = {uid: i for i, uid in enumerate(ft_uids)}        
+
+        data['freethrow'].x = torch.tensor(ft_feats, dtype=torch.float)
+        data['player_stint', 'took_shot', 'freethrow'].edge_index = torch.tensor(edge_ft, dtype=torch.long).t().contiguous()
+        data['foul', 'caused', 'freethrow'].edge_index = torch.tensor(edge_foul_ft, dtype=torch.long).t().contiguous()
+
 
         return data
