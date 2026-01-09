@@ -32,7 +32,6 @@ MERGE_PERIODS = """
 
     MERGE (p)-[:IN_GAME]->(g)
 
-
     WITH g,
         min(datetime(period.start)) AS first_start, 
         max(datetime(period.end)) AS last_end
@@ -40,18 +39,15 @@ MERGE_PERIODS = """
         g.start = first_start,
         g.duration = duration.between(first_start, last_end)
 
-
     WITH distinct g
     MATCH (p:Period)-[:IN_GAME]->(g)
-    
     WITH p ORDER BY p.n ASC
     WITH collect(p) AS periods
     UNWIND range(0, size(periods) - 2) AS i
-
     WITH periods[i] AS current, periods[i+1] AS next
     MERGE (current)-[r:NEXT]->(next)
     ON CREATE SET 
-        r.time_since = duration.between((current.start + current.duration), next.start)
+        r.time_since = duration.between(current.start + current.duration, next.start)
 """
 
 
@@ -125,7 +121,7 @@ MERGE_STINTS = """
                 END,
                 current.end_time = CASE WHEN next IS NOT NULL
                     THEN next.start_time
-                    ELSE (p.start + p.duration)
+                    ELSE p.start + p.duration
                 END
                 
             FOREACH (_ IN CASE WHEN next IS NOT NULL THEN [1] ELSE [] END |
@@ -143,10 +139,8 @@ MERGE_STINTS = """
         WITH g, p, t, pl, ls
         ORDER BY ls.global_clock ASC
 
-        WITH g, p, t, pl, 
-            collect(ls) AS l_stints
-     
-        UNWIND range(0, size(l_stints) -1) AS i
+        WITH g, p, t, pl, collect(ls) AS l_stints
+        UNWIND range(0, size(l_stints)-1) AS i
         WITH g, p, t, pl, l_stints, i, 
             CASE 
                 WHEN i = 0 THEN 1 
@@ -202,13 +196,9 @@ MERGE_STINTS = """
 
     WITH entity, stint
     ORDER BY stint.global_clock ASC
-
     WITH entity, collect(stint) AS stints
     UNWIND range(0, size(stints) - 2) AS j
-    WITH 
-        stints[j] AS current, 
-        stints[j + 1] AS next
-
+    WITH stints[j] AS current, stints[j + 1] AS next
     MERGE (current)-[r:NEXT]->(next)
     ON CREATE SET 
         r.clock_since = next.global_clock - (current.global_clock + current.clock_duration),
@@ -238,64 +228,35 @@ MERGE_JUMPBALLS = """
     FOREACH (_ IN CASE WHEN jb.descriptor = 'unclearpass' THEN [1] ELSE [] END | SET j:UnclearPass)
 
     WITH g, j, jb
-    CALL (g, j, jb) {
-        WITH g, j, jb
-        WHERE jb.won_id IS NOT NULL AND jb.won_id <> 0
-        
-        MATCH (p:Period {n: jb.period})-[:IN_GAME]->(g)
-        MATCH (pl:Player {id: jb.won_id})
-        
-        MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls:LineUpStint)
-        WHERE 
-            (ls)-[:IN_PERIOD]->(p) AND 
-            ls.start_time <= jb.time AND jb.time < ls.end_time
-        
-        MERGE (ps)-[:WON_JUMPBALL]->(j)
-    }
+    WHERE jb.team_id IS NOT NULL 
+    
+    MATCH (:Team {id: jb.team_id})-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
+    WHERE (ls)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g) 
+        AND ls.start_time <= jb.time < ls.end_time
 
-    WITH g, j, jb
-    CALL (g, j, jb) {
-        WITH g, j, jb
-        WHERE jb.lost_id IS NOT NULL AND jb.lost_id <> 0
-        
-        MATCH (p:Period {n: jb.period})-[:IN_GAME]->(g)
-        MATCH (pl:Player {id: jb.lost_id})
-        
-        MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls:LineUpStint)
-        WHERE 
-            (ls)-[:IN_PERIOD]->(p) AND 
-            ls.start_time <= jb.time AND jb.time < ls.end_time
-        
-        MERGE (ps)-[:LOST_JUMPBALL]->(j)
-    }
+    OPTIONAL MATCH (:Player {id: jb.won_id})-[:ON_COURT]->(w_ps:PlayerStint)
+    WHERE (w_ps)-[:ON_COURT_WITH]->(ls)
+    FOREACH (_ IN CASE WHEN w_ps IS NOT NULL THEN [1] ELSE [] END | 
+        MERGE (w_ps)-[:WON_JUMPBALL]->(j)
+    )
 
-    WITH g, j, jb
-    CALL (g, j, jb) {
-        WITH g, j, jb
-        WHERE jb.team_id IS NOT NULL AND jb.team_id <> 0
-        
-        MATCH (p:Period {n: jb.period})-[:IN_GAME]->(g)
-        MATCH (team:Team {id: jb.team_id})
-        
-        MATCH (team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
-        WHERE 
-            (ls)-[:IN_PERIOD]->(p) AND 
-            ls.start_time <= jb.time AND jb.time < ls.end_time
+    WITH g, j, jb, ls
+    OPTIONAL MATCH (:Player {id: jb.lost_id})-[:ON_COURT]->(l_ps:PlayerStint)
+    WHERE (l_ps)-[:ON_COURT_WITH]->(ls)
+    FOREACH (_ IN CASE WHEN l_ps IS NOT NULL THEN [1] ELSE [] END | 
+        MERGE (l_ps)-[:LOST_JUMPBALL]->(j)
+    )
 
-        CALL (jb, ls, j) {
-            WITH jb, ls, j
-            WHERE jb.recovered_id IS NOT NULL AND jb.recovered_id <> 0
-            MATCH (pl:Player {id: jb.recovered_id})
-            MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
-            MERGE (ps)-[:RECOVERED_JUMPBALL]->(j)
-        }
-
-        CALL (jb, ls, j) {
-            WITH jb, ls, j
-            WHERE jb.recovered_id IS NULL OR jb.recovered_id = 0
-            MERGE (ls)-[:RECOVERED_JUMPBALL]->(j)
-        }
-    }
+    WITH g, j, jb, ls
+    OPTIONAL MATCH (:Player {id: jb.recovered_id})-[:ON_COURT]->(r_ps:PlayerStint)
+    WHERE (r_ps)-[:ON_COURT_WITH]->(ls)
+    
+    FOREACH (_ IN CASE WHEN r_ps IS NOT NULL THEN [1] ELSE [] END | 
+        MERGE (r_ps)-[:RECOVERED_JUMPBALL]->(j)
+    )
+    FOREACH (_ IN CASE WHEN r_ps IS NULL THEN [1] ELSE [] END | 
+        MERGE (ls)-[:RECOVERED_JUMPBALL]->(j)
+    )
 """
 
 
@@ -323,29 +284,19 @@ MERGE_VIOLATIONS = """
     FOREACH (_ IN CASE WHEN vio.subtype = 'jump ball' THEN [1] ELSE [] END | SET v:JumpBallViolation)
 
     WITH g, v, vio
-    MATCH (p:Period {n: vio.period})-[:IN_GAME]->(g)
-    MATCH (team:Team {id: vio.team_id})
-    
-    MATCH (team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
-    WHERE 
-        (ls)-[:IN_PERIOD]->(p) AND
-        ls.start_time <= vio.time AND vio.time < ls.end_time
+    MATCH (:Team {id: vio.team_id})-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
+    WHERE (ls)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g) 
+        AND ls.start_time <= vio.time < ls.end_time
 
-    CALL (vio, v, ls) {
-        WITH vio, v, ls
-        WHERE vio.player_id IS NOT NULL AND vio.player_id <> 0
-        
-        MATCH (pl:Player {id: vio.player_id})
-        MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
-        
+    OPTIONAL MATCH (:Player {id: vio.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)
+
+    FOREACH (_ IN CASE WHEN ps IS NOT NULL THEN [1] ELSE [] END | 
         MERGE (ps)-[:COMMITTED_VIOLATION]->(v)
-    }
-
-    CALL (vio, v, ls) {
-        WITH vio, v, ls
-        WHERE vio.player_id = 0 OR vio.player_id IS NULL
+    )
+    FOREACH (_ IN CASE WHEN ps IS NULL THEN [1] ELSE [] END | 
         MERGE (ls)-[:COMMITTED_VIOLATION]->(v)
-    }
+    )
 """
 
 
@@ -378,44 +329,32 @@ MERGE_FOULS = """
     FOREACH (_ IN CASE WHEN foul.descriptor = 'charge' THEN [1] ELSE [] END | SET f:Charge)
 
     WITH g, f, foul
-    MATCH (p:Period {n: foul.period})-[:IN_GAME]->(g)
-    MATCH (t:Team {id: foul.team_id})
-    
-    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
-    WHERE 
-        (ls)-[:IN_PERIOD]->(p) AND
-        ls.start_time <= foul.time AND foul.time < ls.end_time
+    MATCH (t:Team {id: foul.team_id})-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
+    WHERE (ls)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g) 
+        AND ls.start_time <= foul.time < ls.end_time
 
-    CALL (foul, f, ls) {
-        WITH foul, f, ls
-        MATCH (pl:Player {id: foul.player_id})
-        MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
+    OPTIONAL MATCH (:Player {id: foul.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)
+
+    FOREACH (_ IN CASE WHEN ps IS NOT NULL THEN [1] ELSE [] END | 
         MERGE (ps)-[:COMMITTED_FOUL]->(f)
-    }
-
-    CALL (foul, f, ls) {
-        WITH foul, f, ls
-        WHERE 
-            foul.player_id = 0 OR
-            foul.player_id IS NULL OR
-            foul.player_id = foul.team_id
-        
+    )
+    FOREACH (_ IN CASE WHEN ps IS NULL THEN [1] ELSE [] END | 
         MERGE (ls)-[:COMMITTED_FOUL]->(f)
-    }
+    )
 
-    WITH g, f, foul, p
-    CALL (g, f, foul, p) {
-        WITH g, f, foul, p
-        WHERE foul.drawn_id IS NOT NULL AND foul.drawn_id <> 0
-        
-        MATCH (victim:Player {id: foul.drawn_id})
-        MATCH (victim)-[:ON_COURT]->(v_ps:PlayerStint)-[:ON_COURT_WITH]->(v_ls:LineUpStint)
-        WHERE 
-            (v_ls)-[:IN_PERIOD]->(p) AND
-            v_ls.start_time <= foul.time AND foul.time < v_ls.end_time
+    WITH g, f, foul, t
+    WHERE foul.drawn_id IS NOT NULL
 
-        MERGE (v_ps)-[:DREW_FOUL]->(f)
-    }
+    MATCH (ot:Team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ols:LineUpStint)
+    WHERE ot.id <> t.id 
+        AND (ols)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g) 
+        AND ols.start_time <= foul.time < ols.end_time
+
+    MATCH (:Player {id: foul.drawn_id})-[:ON_COURT]->(v_ps:PlayerStint)
+    WHERE (v_ps)-[:ON_COURT_WITH]->(ols)
+
+    MERGE (v_ps)-[:DREW_FOUL]->(f)
 """
 
 
@@ -435,43 +374,6 @@ MERGE_SHOTS = """
         s.x = shot.x, 
         s.y = shot.y,
         s.distance = shot.distance
-
-    WITH g, s, shot
-    MATCH (p:Period {n: shot.period})-[:IN_GAME]->(g)
-    MATCH (t:Team {id: shot.team_id})
-    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
-    WHERE 
-        (ls)-[:IN_PERIOD]->(p) AND
-        ls.start_time <= s.time AND s.time < ls.end_time
-        
-    WITH g, s, shot, ls, p, t
-    MATCH (:Player {id: shot.player_id})-[:ON_COURT]->(ps:PlayerStint)
-    WHERE (ps)-[:ON_COURT_WITH]->(ls)    
-    MERGE (ps)-[:TOOK_SHOT]->(s)
-
-    WITH shot, ls, s, p, t
-
-    CALL (shot, ls, s) {
-        WITH shot, ls, s 
-        WHERE shot.assist_id IS NOT NULL
-        MATCH (assister:Player {id: shot.assist_id})-[:ON_COURT]->(as:PlayerStint)-[:ON_COURT_WITH]->(ls)
-        MERGE (as)-[:ASSISTED]->(s)
-    }
-
-    CALL (shot, p, s, t) {
-        WITH shot, p, s, t 
-        WHERE shot.block_id IS NOT NULL
-        
-        MATCH (ot:Team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ols:LineUpStint)
-        WHERE 
-            ot <> t AND 
-            (ols)-[:IN_PERIOD]->(p) AND
-            ols.start_time <= s.time AND s.time < ols.end_time
-        
-        MATCH (blocker:Player {id: shot.block_id})
-        MATCH (blocker)-[:ON_COURT]->(bs:PlayerStint)-[:ON_COURT_WITH]->(ols)
-        MERGE (bs)-[:BLOCKED]->(s)
-    }
 
     FOREACH (_ IN CASE WHEN shot.type = '2pt' THEN [1] ELSE [] END | SET s:`2PT`)
     FOREACH (_ IN CASE WHEN shot.type = '3pt' THEN [1] ELSE [] END | SET s:`3PT`)
@@ -493,55 +395,87 @@ MERGE_SHOTS = """
     FOREACH (_ IN CASE WHEN shot.descriptor CONTAINS 'alley-oop' THEN [1] ELSE [] END | SET s:AlleyOop)
     FOREACH (_ IN CASE WHEN shot.descriptor CONTAINS 'tip' THEN [1] ELSE [] END | SET s:Tip)
     FOREACH (_ IN CASE WHEN shot.descriptor CONTAINS 'putback' THEN [1] ELSE [] END | SET s:PutBack)
+
+    WITH g, s, shot
+    MATCH (t:Team {id: shot.team_id})-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
+    WHERE (ls)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g) 
+        AND ls.start_time <= s.time < ls.end_time
+        
+    MATCH (:Player {id: shot.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)    
+    MERGE (ps)-[:TOOK_SHOT]->(s)
+
+    WITH g, s, shot, ls, t
+    OPTIONAL MATCH (:Player {id: shot.assist_id})-[:ON_COURT]->(as:PlayerStint)
+    WHERE shot.assist_id IS NOT NULL 
+        AND (as)-[:ON_COURT_WITH]->(ls)
+
+    FOREACH (_ IN CASE WHEN as IS NOT NULL THEN [1] ELSE [] END | 
+        MERGE (as)-[:ASSISTED]->(s)
+    )
+
+    WITH g, s, shot, t
+    WHERE shot.block_id IS NOT NULL
+
+    MATCH (ot:Team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ols:LineUpStint)
+    WHERE ot.id <> t.id 
+        AND (ols)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g) 
+        AND ols.start_time <= s.time < ols.end_time
+    
+    MATCH (:Player {id: shot.block_id})-[:ON_COURT]->(bs:PlayerStint)
+    WHERE (bs)-[:ON_COURT_WITH]->(ols)
+    MERGE (bs)-[:BLOCKED]->(s)
 """
 
 
 MERGE_FREETHROWS = """
     MATCH (g:Game {id: $game_id})
     UNWIND range(0, size($shots)-1) as i
-    WITH g, $shots[i] as ft, i
-    WITH g, ft, i,
-        toString(g.id) + "_" + toString(ft.period) + "_" + ft.clock + "_ft_" + toString(ft.player_id) + "_" + toString(i) AS ft_id
+    WITH g, $shots[i] as ft
+    WITH g, ft,
+        CASE WHEN ft.subtype CONTAINS 'of' 
+            THEN toInteger(split(ft.subtype, ' ')[0]) 
+            ELSE 1 
+        END AS attempt_number
+        
+    WITH g, ft, attempt_number,
+        toString(g.id) + "_" + toString(ft.period) + "_" + ft.clock + "_ft_" + toString(ft.player_id) + "_" + toString(attempt_number) AS ft_id
 
     MERGE (s:Action:Shot:FreeThrow {id: ft_id})
     ON CREATE SET 
-        s.time = datetime(ft.time),
+        s.time = datetime(ft.time) + duration({milliseconds: attempt_number * 100}),
         s.clock = duration(ft.clock),
         s.local_clock = ft.local_clock,
-        s.global_clock = ft.global_clock
+        s.global_clock = ft.global_clock,
+        s.attempt = attempt_number
 
     FOREACH (_ IN CASE WHEN ft.result = 'Made' THEN [1] ELSE [] END | SET s:Made)
     FOREACH (_ IN CASE WHEN ft.result = 'Missed' THEN [1] ELSE [] END | SET s:Missed)
 
-    WITH g, s, ft
-    MATCH (p:Period {n: ft.period})-[:IN_GAME]->(g)
-    MATCH (t:Team {id: ft.team_id})
-    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
-    WHERE 
-        (ls)-[:IN_PERIOD]->(p) AND
-        ls.start_time <= s.time AND s.time < ls.end_time
-        
-    WITH g, s, ft, ls
-    MATCH (shooter:Player {id: ft.player_id})
-    MATCH (shooter)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)    
-    MERGE (ps)-[:TOOK_SHOT]->(s)
-
-    WITH g, s
-    MATCH (f:Action:Foul)
-    WHERE 
-        f.id STARTS WITH toString(g.id) AND
-        f.global_clock = s.global_clock
+    // WITH g, s, ft
+    // MATCH (f:Action:Foul)
+    // WHERE 
+    //     f.id STARTS WITH toString(g.id) AND
+    //     f.global_clock = s.global_clock
     
-    MERGE (f)-[:CAUSED]->(s)
+    // MERGE (f)-[:CAUSED]->(s)
+
+    WITH g, s, ft
+    MATCH (:Team {id: ft.team_id})-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
+    WHERE (ls)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g) 
+        AND ls.start_time <= s.time < ls.end_time
+        
+    WITH s, ft, ls
+    MATCH (:Player {id: ft.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)    
+    MERGE (ps)-[:TOOK_SHOT]->(s)
 """
 
 
 MERGE_REBOUNDS = """
-    MATCH (g:Game {id: $game_id})
     UNWIND $rebounds AS reb
-
-    WITH g, reb,
-        toString(g.id) + "_" + toString(reb.period) + "_" + reb.clock + "_reb_" + 
+    WITH reb,
+        toString($game_id) + "_" + toString(reb.period) + "_" + reb.clock + "_reb_" + 
         COALESCE(toString(NULLIF(reb.player_id, 0)), toString(reb.team_id)) AS reb_id
 
     MERGE (r:Action:Rebound {id: reb_id})
@@ -555,43 +489,28 @@ MERGE_REBOUNDS = """
     FOREACH (_ IN CASE WHEN reb.subtype = 'defensive' THEN [1] ELSE [] END | SET r:Defensive)
 
     WITH g, r, reb
-    MATCH (p:Period {n: reb.period})-[:IN_GAME]->(g)
-    MATCH (t:Team {id: reb.team_id})
-    
-    MATCH (t)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
-    WHERE 
-        (ls)-[:IN_PERIOD]->(p) AND
-        ls.start_time <= r.time AND r.time < ls.end_time 
+    MATCH (:Team {id: reb.team_id})-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
+    WHERE (ls)-[:IN_PERIOD]->(:Period)-[:IN_GAME]->(g) 
+        AND ls.start_time <= r.time < ls.end_time 
         
-    CALL (reb, r, ls) {
-        WITH reb, r, ls
-        MATCH (pl:Player {id: reb.player_id}) 
-        MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
+    OPTIONAL MATCH (:Player {id: reb.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)
+
+    FOREACH (_ IN CASE WHEN ps IS NOT NULL THEN [1] ELSE [] END | 
         MERGE (ps)-[:REBOUNDED]->(r)
-    }
-
-    CALL (reb, r, ls) {
-        WITH reb, r, ls
-        WHERE reb.player_id = 0 OR reb.player_id IS NULL 
+    )
+    FOREACH (_ IN CASE WHEN ps IS NULL THEN [1] ELSE [] END | 
         MERGE (ls)-[:REBOUNDED]->(r)
-    }
-
-    WITH g, r
-    CALL (g, r) {
-        WITH g, r
-        
-        MATCH (s:Shot:Missed)
-        WHERE s.id STARTS WITH toString(g.id) 
-            AND s.global_clock <= r.global_clock
-            AND s.global_clock >= r.global_clock - 10.0
-            AND NOT EXISTS {
-                MATCH (other:Rebound)-[:REBOUND_OF]->(s)
-                WHERE other.id <> r.id
-            }
-        
-        WITH s ORDER BY s.global_clock DESC LIMIT 1
-        MERGE (r)-[:REBOUND_OF]->(s)
-    }
+    )
+    
+    WITH r
+    MATCH (s:Shot:Missed)
+    WHERE s.id STARTS WITH toString($game_id) 
+        AND s.global_clock <= r.global_clock <= s.global_clock + 10.0 
+        AND NOT EXISTS { MATCH (:Rebound)-[:REBOUND_OF]->(s) }
+    
+    WITH s ORDER BY s.global_clock DESC LIMIT 1
+    MERGE (r)-[:REBOUND_OF]->(s)
 """
 
 
@@ -622,35 +541,30 @@ MERGE_TURNOVERS = """
     FOREACH (_ IN CASE WHEN tov.descriptor = 'step' THEN [1] ELSE [] END | SET t:Step)
 
     WITH g, t, tov
-    MATCH (p:Period {n: tov.period})-[:IN_GAME]->(g)
-    MATCH (team:Team {id: tov.team_id})
+    MATCH (team:Team {id: tov.team_id})-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
+    WHERE ls.start_time <= tov.time < ls.end_time
+            
+    OPTIONAL MATCH (:Player {id: tov.player_id})-[:ON_COURT]->(ps:PlayerStint)
+    WHERE (ps)-[:ON_COURT_WITH]->(ls)
     
-    MATCH (team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
-    WHERE 
-        (ls)-[:IN_PERIOD]->(p) AND
-        ls.start_time <= tov.time AND tov.time < ls.end_time
-        
-    OPTIONAL MATCH (pl:Player {id: tov.player_id})
-    OPTIONAL MATCH (pl)-[:ON_COURT]->(ps:PlayerStint)-[:ON_COURT_WITH]->(ls)
+    FOREACH (_ IN CASE WHEN ps IS NOT NULL THEN [1] ELSE [] END | 
+        MERGE (ps)-[:LOST_BALL]->(t)
+    )
+    FOREACH (_ IN CASE WHEN ps IS NULL THEN [1] ELSE [] END | 
+        MERGE (ls)-[:LOST_BALL]->(t)
+    )
     
-    FOREACH (_ IN CASE WHEN ps IS NOT NULL THEN [1] ELSE [] END | MERGE (ps)-[:LOST_BALL]->(t))
-    FOREACH (_ IN CASE WHEN ps IS NULL THEN [1] ELSE [] END | MERGE (ls)-[:LOST_BALL]->(t))
+    WITH g, t, tov, team
+    WHERE tov.steal_id IS NOT NULL 
 
-    WITH g, t, tov, p
-    CALL (g, t, tov, p) {
-        WITH g, t, tov, p
-        WHERE tov.steal_id IS NOT NULL AND tov.steal_id <> 0
+    MATCH (ot:Team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ols:LineUpStint)
+    WHERE ot.id <> team.id 
+        AND ols.start_time <= tov.time < ols.end_time
         
-        MATCH (stealer:Player {id: tov.steal_id})
-        MATCH (stealer)-[:ON_COURT]->(s_ps:PlayerStint)
-        
-        MATCH (s_ps)-[:ON_COURT_WITH]->(s_ls:LineUpStint)
-        WHERE 
-            (s_ls)-[:IN_PERIOD]->(p) AND
-            s_ls.start_time <= tov.time AND tov.time < s_ls.end_time
+    MATCH (:Player {id: tov.steal_id})-[:ON_COURT]->(s_ps:PlayerStint)
+    WHERE (s_ps)-[:ON_COURT_WITH]->(ols)
 
-        MERGE (s_ps)-[:STOLE_BALL]->(t)
-    }
+    MERGE (s_ps)-[:STOLE_BALL]->(t)
 """
 
 
@@ -671,15 +585,9 @@ MERGE_TIMEOUTS = """
     FOREACH (_ IN CASE WHEN to.subtype = 'full' THEN [1] ELSE [] END | SET t:FullTimeOut)
     FOREACH (_ IN CASE WHEN to.subtype = 'short' THEN [1] ELSE [] END | SET t:ShortTimeOut)
 
-    WITH g, t, to
-    MATCH (p:Period {n: to.period})-[:IN_GAME]->(g)
-    MATCH (team:Team {id: to.team_id})
-    
-    MATCH (team)-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
-    WHERE 
-        (ls)-[:IN_PERIOD]->(p) AND
-        ls.start_time <= to.time AND to.time < ls.end_time
-
+    WITH t, to
+    MATCH (:Team {id: to.team_id})-[:HAS_LINEUP]->(:LineUp)-[:ON_COURT]->(ls:LineUpStint)
+    WHERE ls.start_time <= to.time < ls.end_time
     MERGE (ls)-[:CALLED_TIMEOUT]->(t)
 """
 
@@ -818,8 +726,8 @@ MERGE_SCORES = """
         sc.time = s.time
 
     MERGE (s)-[:GENERATED_SCORE]->(sc)
-    MERGE (sc)-[:AT_STINT]->(hls)
-    MERGE (sc)-[:AT_STINT]->(als)
+    // MERGE (sc)-[:AT_STINT]->(hls)
+    // MERGE (sc)-[:AT_STINT]->(als)
 
     WITH calculated_chain
     UNWIND range(0, size(calculated_chain)-2) AS i
@@ -831,6 +739,35 @@ MERGE_SCORES = """
     MATCH (n:Score {id: next.id})
     MERGE (c)-[:NEXT]->(n)
 """
+
+
+MERGE_NEXT_ACTION = """
+    MATCH (g:Game {id: $game_id})<-[:IN_GAME]-(p:Period)
+    MATCH (a:Action) 
+    WHERE a.id STARTS WITH toString(g.id) + "_" + toString(p.n)
+    WITH p, a,
+        CASE 
+            WHEN a:JumpBall  THEN 1  
+            WHEN a:Foul      THEN 2  
+            WHEN a:Violation THEN 3  
+            WHEN a:TurnOver  THEN 4  
+            WHEN a:Shot      THEN 5  
+            WHEN a:Rebound   THEN 6  
+            WHEN a:FreeThrow THEN 7  
+            WHEN a:TimeOut   THEN 8  
+            ELSE 9 
+        END AS priority
+    
+    ORDER BY a.time ASC, a.global_clock ASC, priority ASC
+    WITH p, collect(a) AS actions
+    UNWIND range(0, size(actions) - 2) AS i
+    WITH actions[i] AS current, actions[i+1] AS next
+    MERGE (current)-[r:NEXT]->(next)
+    ON CREATE SET 
+        r.time_delta = duration.between(current.time, next.time),
+        r.clock_delta = next.global_clock - current.global_clock
+"""
+
 
 
 SET_PLUS_MINUS = """

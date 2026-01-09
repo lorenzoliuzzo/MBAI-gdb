@@ -12,7 +12,7 @@ from ..queries.game import \
     MERGE_JUMPBALLS, MERGE_VIOLATIONS, MERGE_FOULS, \
     MERGE_SHOTS, MERGE_FREETHROWS, \
     MERGE_REBOUNDS, MERGE_TURNOVERS, MERGE_TIMEOUTS, \
-    MERGE_SCORES, SET_PLUS_MINUS
+    MERGE_NEXT_ACTION, MERGE_SCORES, SET_PLUS_MINUS
 
 import torch
 from torch_geometric.data import HeteroData
@@ -62,8 +62,7 @@ class GameManager(BaseManager):
 
 
         try: 
-            pbp_df = fetch_pbp(self.game_id)
-        
+            pbp_df = fetch_pbp(self.game_id)        
         except Exception as e: 
             print(f"⛔ Critical failure in `load_game` for ID {self.game_id}: couldn't fetch the play-by-play actions: {e}")
             return None
@@ -316,6 +315,7 @@ class GameManager(BaseManager):
         self.execute_write(MERGE_TIMEOUTS, timeout_params)
 
         params = {"game_id": self.game_id}
+        self.execute_write(MERGE_NEXT_ACTION, params)
         self.execute_write(MERGE_SCORES, params)
         # self.execute_write(SET_PLUS_MINUS, params)
 
